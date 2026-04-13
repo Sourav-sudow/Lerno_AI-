@@ -1,7 +1,9 @@
 import { API_BASE_URL } from "./apiBaseUrl";
+import type { CampusSelection } from "./campusData";
 
 export type UserRole = "student" | "faculty";
 export type ThemeMode = "dark" | "light";
+export type VerificationStatus = "unverified" | "otp_verified" | "trusted_domain";
 
 export type SavedTopic = {
   title: string;
@@ -35,6 +37,18 @@ export type SessionProfile = {
   semester?: string;
   department?: string;
   designation?: string;
+  universityId?: string;
+  universitySlug?: string;
+  universityName?: string;
+  departmentId?: string;
+  departmentName?: string;
+  programId?: string;
+  programName?: string;
+  termId?: string;
+  termName?: string;
+  verificationStatus?: VerificationStatus | string;
+  referralCode?: string;
+  referredByCode?: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -60,6 +74,23 @@ export type AppSession = {
   profile: SessionProfile | null;
   preferences: SessionPreferences;
   learningState: LearningState;
+  universityId?: string;
+  universitySlug?: string;
+  departmentId?: string;
+  programId?: string;
+  termId?: string;
+  verificationStatus?: VerificationStatus | string;
+  referralCode?: string;
+};
+
+export type PendingSignupContext = CampusSelection & {
+  email?: string;
+  role?: UserRole;
+  departmentName?: string;
+  programName?: string;
+  termName?: string;
+  verificationStatus?: VerificationStatus | string;
+  referredByCode?: string;
 };
 
 export type VerifyOtpResult = {
@@ -79,6 +110,15 @@ export type OnboardingPayload = {
   semester?: string;
   department?: string;
   designation?: string;
+  universityId?: string;
+  universitySlug?: string;
+  departmentId?: string;
+  programId?: string;
+  termId?: string;
+  verificationStatus?: VerificationStatus | string;
+  referralCode?: string;
+  referredByCode?: string;
+  otpChannel?: "email";
 };
 
 export type ProfileUpdatePayload = {
@@ -91,6 +131,14 @@ export type ProfileUpdatePayload = {
   semester?: string;
   department?: string;
   designation?: string;
+  universityId?: string;
+  universitySlug?: string;
+  departmentId?: string;
+  programId?: string;
+  termId?: string;
+  verificationStatus?: VerificationStatus | string;
+  referralCode?: string;
+  referredByCode?: string;
 };
 
 export type FacultyDashboardData = {
@@ -109,7 +157,7 @@ const THEME_STORAGE_KEY = "lernoTheme";
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "lernoSidebarCollapsed";
 const RECENT_TOPICS_STORAGE_KEY = "lernoRecentTopics";
 const BOOKMARKED_TOPICS_STORAGE_KEY = "lernoBookmarkedTopics";
-const PENDING_SIGNUP_ROLE_STORAGE_KEY = "lernoPendingSignupRole";
+const PENDING_SIGNUP_CONTEXT_STORAGE_KEY = "lernoPendingSignupContext";
 
 function normalizeTopic(topic: SavedTopic): SavedTopic | null {
   const title = topic?.title?.trim();
@@ -126,6 +174,77 @@ function normalizeTopic(topic: SavedTopic): SavedTopic | null {
   };
 }
 
+function normalizePendingSignupContext(
+  input: Partial<PendingSignupContext>
+): PendingSignupContext | null {
+  const email = input.email?.trim().toLowerCase() || "";
+  const role = input.role === "faculty" || input.role === "student" ? input.role : undefined;
+  const universityId = input.universityId?.trim() || "";
+  const universitySlug = input.universitySlug?.trim() || "";
+  const departmentId = input.departmentId?.trim() || "";
+  const programId = input.programId?.trim() || "";
+  const termId = input.termId?.trim() || "";
+
+  if (!email && !role && !universityId && !departmentId && !programId && !termId) {
+    return null;
+  }
+
+  return {
+    email,
+    role,
+    universityId,
+    universitySlug,
+    departmentId,
+    programId,
+    termId,
+    departmentName: input.departmentName || "",
+    programName: input.programName || "",
+    termName: input.termName || "",
+    referralCode: input.referralCode || "",
+    referredByCode: input.referredByCode || "",
+    verificationStatus: input.verificationStatus || "otp_verified",
+  };
+}
+
+function normalizeProfile(
+  profile: Partial<SessionProfile> | null | undefined,
+  email: string,
+  role: UserRole | null
+): SessionProfile | null {
+  if (!profile || !role) return null;
+
+  return {
+    uid: profile.uid || email,
+    email,
+    role,
+    fullName: profile.fullName || email.split("@")[0] || "Lerno User",
+    phone: profile.phone || "",
+    avatar:
+      profile.avatar ||
+      `https://api.dicebear.com/7.x/notionists-neutral/svg?seed=${encodeURIComponent(email)}`,
+    isOnboarded: Boolean(profile.isOnboarded),
+    course: profile.course || profile.programName || "",
+    year: profile.year || "",
+    semester: profile.semester || profile.termName || "",
+    department: profile.department || profile.departmentName || "",
+    designation: profile.designation || "",
+    universityId: profile.universityId || "",
+    universitySlug: profile.universitySlug || "",
+    universityName: profile.universityName || "",
+    departmentId: profile.departmentId || "",
+    departmentName: profile.departmentName || "",
+    programId: profile.programId || "",
+    programName: profile.programName || "",
+    termId: profile.termId || "",
+    termName: profile.termName || "",
+    verificationStatus: (profile.verificationStatus || "unverified") as VerificationStatus | string,
+    referralCode: profile.referralCode || "",
+    referredByCode: profile.referredByCode || "",
+    createdAt: typeof profile.createdAt === "number" ? profile.createdAt : Date.now(),
+    updatedAt: typeof profile.updatedAt === "number" ? profile.updatedAt : Date.now(),
+  };
+}
+
 function normalizeSession(input: Partial<AppSession> & { email: string }): AppSession {
   const preferences = input.preferences || {
     theme: "dark",
@@ -136,24 +255,28 @@ function normalizeSession(input: Partial<AppSession> & { email: string }): AppSe
     bookmarkedTopics: [],
     currentSelection: {},
   };
+  const email = input.email.trim().toLowerCase();
+  const role =
+    input.role === "student" || input.role === "faculty" ? input.role : null;
+  const profile = normalizeProfile(input.profile, email, role);
 
   return {
     isAuthenticated: input.isAuthenticated ?? true,
-    email: input.email.trim().toLowerCase(),
+    email,
     exists: Boolean(input.exists),
     isOnboarded: Boolean(input.isOnboarded),
-    role: input.role || null,
-    profile: input.profile || null,
+    role,
+    profile,
     preferences: {
       theme: preferences.theme === "light" ? "light" : "dark",
       sidebarCollapsed: Boolean(preferences.sidebarCollapsed),
     },
     learningState: {
       recentTopics: Array.isArray(learningState.recentTopics)
-        ? learningState.recentTopics.map(normalizeTopic).filter(Boolean) as SavedTopic[]
+        ? (learningState.recentTopics.map(normalizeTopic).filter(Boolean) as SavedTopic[])
         : [],
       bookmarkedTopics: Array.isArray(learningState.bookmarkedTopics)
-        ? learningState.bookmarkedTopics.map(normalizeTopic).filter(Boolean) as SavedTopic[]
+        ? (learningState.bookmarkedTopics.map(normalizeTopic).filter(Boolean) as SavedTopic[])
         : [],
       currentSelection: {
         title: learningState.currentSelection?.title || "",
@@ -167,6 +290,14 @@ function normalizeSession(input: Partial<AppSession> & { email: string }): AppSe
       },
       updatedAt: learningState.updatedAt,
     },
+    universityId: input.universityId || profile?.universityId || "",
+    universitySlug: input.universitySlug || profile?.universitySlug || "",
+    departmentId: input.departmentId || profile?.departmentId || "",
+    programId: input.programId || profile?.programId || "",
+    termId: input.termId || profile?.termId || "",
+    verificationStatus:
+      input.verificationStatus || profile?.verificationStatus || "unverified",
+    referralCode: input.referralCode || profile?.referralCode || "",
   };
 }
 
@@ -321,21 +452,44 @@ export function clearCachedSession() {
     "selectedTopicSubjectTitle",
     "selectedTopicUnitTitle",
     "selectedTopicUnitTopics",
-    PENDING_SIGNUP_ROLE_STORAGE_KEY,
+    "lernoCompletedPracticeTopics",
+    PENDING_SIGNUP_CONTEXT_STORAGE_KEY,
   ].forEach((key) => localStorage.removeItem(key));
 }
 
+export function setPendingSignupContext(context: PendingSignupContext) {
+  const normalized = normalizePendingSignupContext(context);
+  if (!normalized) return;
+  localStorage.setItem(PENDING_SIGNUP_CONTEXT_STORAGE_KEY, JSON.stringify(normalized));
+}
+
+export function getPendingSignupContext(): PendingSignupContext | null {
+  const raw = localStorage.getItem(PENDING_SIGNUP_CONTEXT_STORAGE_KEY);
+  if (!raw) return null;
+  try {
+    return normalizePendingSignupContext(JSON.parse(raw));
+  } catch {
+    localStorage.removeItem(PENDING_SIGNUP_CONTEXT_STORAGE_KEY);
+    return null;
+  }
+}
+
+export function clearPendingSignupContext() {
+  localStorage.removeItem(PENDING_SIGNUP_CONTEXT_STORAGE_KEY);
+}
+
 export function setPendingSignupRole(role: UserRole) {
-  localStorage.setItem(PENDING_SIGNUP_ROLE_STORAGE_KEY, role);
+  const current = getPendingSignupContext() || {};
+  setPendingSignupContext({ ...current, role });
 }
 
 export function getPendingSignupRole(): UserRole | null {
-  const value = localStorage.getItem(PENDING_SIGNUP_ROLE_STORAGE_KEY);
-  return value === "student" || value === "faculty" ? value : null;
+  const role = getPendingSignupContext()?.role;
+  return role === "student" || role === "faculty" ? role : null;
 }
 
 export function clearPendingSignupRole() {
-  localStorage.removeItem(PENDING_SIGNUP_ROLE_STORAGE_KEY);
+  clearPendingSignupContext();
 }
 
 export function getDefaultRouteForSession(session: AppSession | null) {
@@ -345,11 +499,39 @@ export function getDefaultRouteForSession(session: AppSession | null) {
   return "/learning";
 }
 
-export async function verifyOtpAndBootstrap(email: string, otp: string) {
+export function getCampusSelectionFromSession(
+  session: AppSession | null
+): CampusSelection & { verificationStatus?: VerificationStatus | string } {
+  return {
+    universityId: session?.universityId || session?.profile?.universityId || "",
+    universitySlug: session?.universitySlug || session?.profile?.universitySlug || "",
+    departmentId: session?.departmentId || session?.profile?.departmentId || "",
+    programId: session?.programId || session?.profile?.programId || "",
+    termId: session?.termId || session?.profile?.termId || "",
+    referralCode: session?.referralCode || session?.profile?.referralCode || "",
+    verificationStatus:
+      session?.verificationStatus || session?.profile?.verificationStatus || "unverified",
+  };
+}
+
+export async function verifyOtpAndBootstrap(payload: {
+  email: string;
+  otp: string;
+  mode?: "login" | "signup";
+  role?: UserRole;
+  universityId?: string;
+  universitySlug?: string;
+  departmentId?: string;
+  programId?: string;
+  termId?: string;
+  referralCode?: string;
+  referredByCode?: string;
+  otpChannel?: "email";
+}) {
   const response = await fetch(`${API_BASE_URL}/verify-otp`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, otp }),
+    body: JSON.stringify(payload),
   });
 
   const data = await parseResponse<VerifyOtpResult>(response);

@@ -7,6 +7,13 @@ import {
   updateProfile,
   type UserRole,
 } from "../services/appSession";
+import {
+  getCampusSelectionSummary,
+  getDepartmentsForUniversity,
+  getProgramsForDepartment,
+  getTermsForProgram,
+  getUniversityRegistry,
+} from "../services/campusData";
 
 const THEME_STORAGE_KEY = "lernoTheme";
 const DEFAULT_AVATAR = "https://i.pravatar.cc/240?img=64";
@@ -18,17 +25,27 @@ function readTheme() {
 export default function ProfilePage() {
   const navigate = useNavigate();
   const session = useMemo(() => getCachedSession(), []);
+  const universities = useMemo(() => getUniversityRegistry(), []);
   const theme = readTheme();
   const isDarkTheme = theme === "dark";
 
-  const [name, setName] = useState(session?.profile?.fullName || "Sourav Kumar");
+  const [name, setName] = useState(session?.profile?.fullName || "Lerno User");
   const [phone, setPhone] = useState(session?.profile?.phone || "");
   const [avatar, setAvatar] = useState(session?.profile?.avatar || DEFAULT_AVATAR);
-  const [course, setCourse] = useState(session?.profile?.course || "");
   const [year, setYear] = useState(session?.profile?.year || "");
-  const [semester, setSemester] = useState(session?.profile?.semester || "");
-  const [department, setDepartment] = useState(session?.profile?.department || "");
   const [designation, setDesignation] = useState(session?.profile?.designation || "");
+  const [selectedUniversityId, setSelectedUniversityId] = useState(
+    session?.profile?.universityId || session?.universityId || universities[0]?.id || ""
+  );
+  const [selectedDepartmentId, setSelectedDepartmentId] = useState(
+    session?.profile?.departmentId || session?.departmentId || ""
+  );
+  const [selectedProgramId, setSelectedProgramId] = useState(
+    session?.profile?.programId || session?.programId || ""
+  );
+  const [selectedTermId, setSelectedTermId] = useState(
+    session?.profile?.termId || session?.termId || ""
+  );
   const [isSaving, setIsSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -36,10 +53,32 @@ export default function ProfilePage() {
   const profile = session?.profile;
   const email = session?.email || localStorage.getItem("userEmail") || "";
   const role = (profile?.role || session?.role || "student") as UserRole;
+  const departments = useMemo(
+    () => getDepartmentsForUniversity(selectedUniversityId),
+    [selectedUniversityId]
+  );
+  const programs = useMemo(
+    () => getProgramsForDepartment(selectedUniversityId, selectedDepartmentId),
+    [selectedDepartmentId, selectedUniversityId]
+  );
+  const terms = useMemo(
+    () => getTermsForProgram(selectedUniversityId, selectedDepartmentId, selectedProgramId),
+    [selectedDepartmentId, selectedProgramId, selectedUniversityId]
+  );
+  const selectionSummary = useMemo(
+    () =>
+      getCampusSelectionSummary({
+        universityId: selectedUniversityId,
+        departmentId: selectedDepartmentId,
+        programId: selectedProgramId,
+        termId: selectedTermId,
+      }),
+    [selectedDepartmentId, selectedProgramId, selectedTermId, selectedUniversityId]
+  );
 
   const initials = useMemo(() => {
     const parts = name.trim().split(/\s+/).filter(Boolean);
-    return parts.slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "S";
+    return parts.slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "L";
   }, [name]);
 
   useEffect(() => {
@@ -53,14 +92,15 @@ export default function ProfilePage() {
         const nextSession = await fetchSession(email);
         const nextProfile = nextSession.profile;
         if (!nextProfile) return;
-        setName(nextProfile.fullName || "Sourav Kumar");
+        setName(nextProfile.fullName || "Lerno User");
         setPhone(nextProfile.phone || "");
         setAvatar(nextProfile.avatar || DEFAULT_AVATAR);
-        setCourse(nextProfile.course || "");
         setYear(nextProfile.year || "");
-        setSemester(nextProfile.semester || "");
-        setDepartment(nextProfile.department || "");
         setDesignation(nextProfile.designation || "");
+        setSelectedUniversityId(nextProfile.universityId || universities[0]?.id || "");
+        setSelectedDepartmentId(nextProfile.departmentId || "");
+        setSelectedProgramId(nextProfile.programId || "");
+        setSelectedTermId(nextProfile.termId || "");
       } catch (err) {
         setError((err as Error).message || "Failed to load profile.");
       } finally {
@@ -69,7 +109,25 @@ export default function ProfilePage() {
     };
 
     loadProfile();
-  }, [email, navigate, session]);
+  }, [email, navigate, session, universities]);
+
+  useEffect(() => {
+    if (!selectedDepartmentId && departments[0]?.id) {
+      setSelectedDepartmentId(departments[0].id);
+    }
+  }, [departments, selectedDepartmentId]);
+
+  useEffect(() => {
+    if (!selectedProgramId && programs[0]?.id) {
+      setSelectedProgramId(programs[0].id);
+    }
+  }, [programs, selectedProgramId]);
+
+  useEffect(() => {
+    if (!selectedTermId && terms[0]?.id) {
+      setSelectedTermId(terms[0].id);
+    }
+  }, [selectedTermId, terms]);
 
   const handleImageChange = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -91,14 +149,25 @@ export default function ProfilePage() {
     try {
       const nextSession = await updateProfile({
         email,
-        fullName: name.trim() || "Sourav Kumar",
+        fullName: name.trim() || "Lerno User",
         phone: phone.trim(),
         avatar: avatar || DEFAULT_AVATAR,
-        course,
+        course: selectionSummary.programName,
         year,
-        semester,
-        department,
+        semester: selectionSummary.termName,
+        department: selectionSummary.departmentName,
         designation,
+        universityId: selectedUniversityId,
+        universitySlug: selectionSummary.universitySlug,
+        departmentId: selectedDepartmentId,
+        programId: selectedProgramId,
+        termId: selectedTermId,
+        verificationStatus:
+          (session?.verificationStatus as string) ||
+          (session?.profile?.verificationStatus as string) ||
+          "otp_verified",
+        referralCode: session?.referralCode || session?.profile?.referralCode,
+        referredByCode: session?.profile?.referredByCode,
       });
       navigate(getDefaultRouteForSession(nextSession));
     } catch (err) {
@@ -112,7 +181,7 @@ export default function ProfilePage() {
 
   return (
     <div
-      className={`min-h-screen w-full px-4 py-10 md:px-6 transition-colors duration-300 ${
+      className={`min-h-screen w-full px-4 py-10 transition-colors duration-300 md:px-6 ${
         isDarkTheme
           ? "bg-black"
           : "bg-[radial-gradient(circle_at_top,_rgba(255,255,255,0.96),_rgba(239,244,255,0.96),_rgba(232,239,252,0.98))]"
@@ -162,7 +231,7 @@ export default function ProfilePage() {
                     isDarkTheme ? "text-white/40" : "text-slate-500"
                   }`}
                 >
-                  {role === "faculty" ? "Faculty Profile" : "Student Profile"}
+                  {role === "faculty" ? "Faculty Profile" : "Learner Profile"}
                 </p>
                 <h1
                   className={`mt-2 text-3xl font-semibold ${
@@ -176,7 +245,7 @@ export default function ProfilePage() {
                     isDarkTheme ? "text-white/55" : "text-slate-600"
                   }`}
                 >
-                  This page is backed by Firestore, so your updates stay synced across future logins.
+                  Update your campus-scoped profile without breaking your synced learning session.
                 </p>
               </div>
 
@@ -270,95 +339,133 @@ export default function ProfilePage() {
                     />
                   </div>
 
+                  <div className="grid gap-5 md:grid-cols-2">
+                    <label className="space-y-2">
+                      <span className={`text-sm font-medium ${isDarkTheme ? "text-white/70" : "text-slate-700"}`}>
+                        University
+                      </span>
+                      <select
+                        value={selectedUniversityId}
+                        onChange={(e) => {
+                          setSelectedUniversityId(e.target.value);
+                          setSelectedDepartmentId("");
+                          setSelectedProgramId("");
+                          setSelectedTermId("");
+                        }}
+                        className={`w-full rounded-2xl border px-4 py-3 outline-none transition ${
+                          isDarkTheme
+                            ? "border-white/10 bg-white/5 text-white"
+                            : "border-slate-300 bg-white text-slate-900"
+                        }`}
+                      >
+                        {universities.map((university) => (
+                          <option key={university.id} value={university.id}>
+                            {university.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label className="space-y-2">
+                      <span className={`text-sm font-medium ${isDarkTheme ? "text-white/70" : "text-slate-700"}`}>
+                        Department Family
+                      </span>
+                      <select
+                        value={selectedDepartmentId}
+                        onChange={(e) => {
+                          setSelectedDepartmentId(e.target.value);
+                          setSelectedProgramId("");
+                          setSelectedTermId("");
+                        }}
+                        className={`w-full rounded-2xl border px-4 py-3 outline-none transition ${
+                          isDarkTheme
+                            ? "border-white/10 bg-white/5 text-white"
+                            : "border-slate-300 bg-white text-slate-900"
+                        }`}
+                      >
+                        {departments.map((department) => (
+                          <option key={department.id} value={department.id}>
+                            {department.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label className="space-y-2">
+                      <span className={`text-sm font-medium ${isDarkTheme ? "text-white/70" : "text-slate-700"}`}>
+                        Program
+                      </span>
+                      <select
+                        value={selectedProgramId}
+                        onChange={(e) => {
+                          setSelectedProgramId(e.target.value);
+                          setSelectedTermId("");
+                        }}
+                        className={`w-full rounded-2xl border px-4 py-3 outline-none transition ${
+                          isDarkTheme
+                            ? "border-white/10 bg-white/5 text-white"
+                            : "border-slate-300 bg-white text-slate-900"
+                        }`}
+                      >
+                        {programs.map((program) => (
+                          <option key={program.id} value={program.id}>
+                            {program.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <label className="space-y-2">
+                      <span className={`text-sm font-medium ${isDarkTheme ? "text-white/70" : "text-slate-700"}`}>
+                        Term
+                      </span>
+                      <select
+                        value={selectedTermId}
+                        onChange={(e) => setSelectedTermId(e.target.value)}
+                        className={`w-full rounded-2xl border px-4 py-3 outline-none transition ${
+                          isDarkTheme
+                            ? "border-white/10 bg-white/5 text-white"
+                            : "border-slate-300 bg-white text-slate-900"
+                        }`}
+                      >
+                        {terms.map((term) => (
+                          <option key={term.id} value={term.id}>
+                            {term.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
                   {role === "student" ? (
-                    <div className="grid gap-5 md:grid-cols-2">
-                      <label className="space-y-2">
-                        <span className={`text-sm font-medium ${isDarkTheme ? "text-white/70" : "text-slate-700"}`}>
-                          Course
-                        </span>
-                        <input
-                          value={course}
-                          onChange={(e) => setCourse(e.target.value)}
-                          className={`w-full rounded-2xl border px-4 py-3 outline-none transition ${
-                            isDarkTheme
-                              ? "border-white/10 bg-white/5 text-white"
-                              : "border-slate-300 bg-white text-slate-900"
-                          }`}
-                        />
+                    <div>
+                      <label className={`mb-2 block text-sm font-medium ${isDarkTheme ? "text-white/70" : "text-slate-700"}`}>
+                        Cohort / Year
                       </label>
-                      <label className="space-y-2">
-                        <span className={`text-sm font-medium ${isDarkTheme ? "text-white/70" : "text-slate-700"}`}>
-                          Department
-                        </span>
-                        <input
-                          value={department}
-                          onChange={(e) => setDepartment(e.target.value)}
-                          className={`w-full rounded-2xl border px-4 py-3 outline-none transition ${
-                            isDarkTheme
-                              ? "border-white/10 bg-white/5 text-white"
-                              : "border-slate-300 bg-white text-slate-900"
-                          }`}
-                        />
-                      </label>
-                      <label className="space-y-2">
-                        <span className={`text-sm font-medium ${isDarkTheme ? "text-white/70" : "text-slate-700"}`}>
-                          Year
-                        </span>
-                        <input
-                          value={year}
-                          onChange={(e) => setYear(e.target.value)}
-                          className={`w-full rounded-2xl border px-4 py-3 outline-none transition ${
-                            isDarkTheme
-                              ? "border-white/10 bg-white/5 text-white"
-                              : "border-slate-300 bg-white text-slate-900"
-                          }`}
-                        />
-                      </label>
-                      <label className="space-y-2">
-                        <span className={`text-sm font-medium ${isDarkTheme ? "text-white/70" : "text-slate-700"}`}>
-                          Semester
-                        </span>
-                        <input
-                          value={semester}
-                          onChange={(e) => setSemester(e.target.value)}
-                          className={`w-full rounded-2xl border px-4 py-3 outline-none transition ${
-                            isDarkTheme
-                              ? "border-white/10 bg-white/5 text-white"
-                              : "border-slate-300 bg-white text-slate-900"
-                          }`}
-                        />
-                      </label>
+                      <input
+                        value={year}
+                        onChange={(e) => setYear(e.target.value)}
+                        className={`w-full rounded-2xl border px-4 py-3 outline-none transition ${
+                          isDarkTheme
+                            ? "border-white/10 bg-white/5 text-white"
+                            : "border-slate-300 bg-white text-slate-900"
+                        }`}
+                      />
                     </div>
                   ) : (
-                    <div className="grid gap-5 md:grid-cols-2">
-                      <label className="space-y-2">
-                        <span className={`text-sm font-medium ${isDarkTheme ? "text-white/70" : "text-slate-700"}`}>
-                          Department
-                        </span>
-                        <input
-                          value={department}
-                          onChange={(e) => setDepartment(e.target.value)}
-                          className={`w-full rounded-2xl border px-4 py-3 outline-none transition ${
-                            isDarkTheme
-                              ? "border-white/10 bg-white/5 text-white"
-                              : "border-slate-300 bg-white text-slate-900"
-                          }`}
-                        />
+                    <div>
+                      <label className={`mb-2 block text-sm font-medium ${isDarkTheme ? "text-white/70" : "text-slate-700"}`}>
+                        Designation
                       </label>
-                      <label className="space-y-2">
-                        <span className={`text-sm font-medium ${isDarkTheme ? "text-white/70" : "text-slate-700"}`}>
-                          Designation
-                        </span>
-                        <input
-                          value={designation}
-                          onChange={(e) => setDesignation(e.target.value)}
-                          className={`w-full rounded-2xl border px-4 py-3 outline-none transition ${
-                            isDarkTheme
-                              ? "border-white/10 bg-white/5 text-white"
-                              : "border-slate-300 bg-white text-slate-900"
-                          }`}
-                        />
-                      </label>
+                      <input
+                        value={designation}
+                        onChange={(e) => setDesignation(e.target.value)}
+                        className={`w-full rounded-2xl border px-4 py-3 outline-none transition ${
+                          isDarkTheme
+                            ? "border-white/10 bg-white/5 text-white"
+                            : "border-slate-300 bg-white text-slate-900"
+                        }`}
+                      />
                     </div>
                   )}
 
@@ -411,9 +518,9 @@ export default function ProfilePage() {
               <div className="mt-5 space-y-4">
                 <div>
                   <p className={`text-sm ${isDarkTheme ? "text-white/50" : "text-slate-500"}`}>
-                    College Email
+                    Account Email
                   </p>
-                  <p className={`mt-1 text-sm font-medium break-all ${isDarkTheme ? "text-white" : "text-slate-900"}`}>
+                  <p className={`mt-1 break-all text-sm font-medium ${isDarkTheme ? "text-white" : "text-slate-900"}`}>
                     {email}
                   </p>
                 </div>
@@ -437,10 +544,25 @@ export default function ProfilePage() {
                 </div>
                 <div>
                   <p className={`text-sm ${isDarkTheme ? "text-white/50" : "text-slate-500"}`}>
+                    Campus Scope
+                  </p>
+                  <p className={`mt-1 text-sm font-medium ${isDarkTheme ? "text-white" : "text-slate-900"}`}>
+                    {selectionSummary.universityName || "Campus not set"}
+                  </p>
+                  <p className={`mt-1 text-sm ${isDarkTheme ? "text-white/60" : "text-slate-600"}`}>
+                    {selectionSummary.departmentName || "Department family"}
+                    {" · "}
+                    {selectionSummary.programName || "Program"}
+                    {" · "}
+                    {selectionSummary.termName || "Term"}
+                  </p>
+                </div>
+                <div>
+                  <p className={`text-sm ${isDarkTheme ? "text-white/50" : "text-slate-500"}`}>
                     Firestore Sync
                   </p>
                   <p className={`mt-1 text-sm font-medium ${isDarkTheme ? "text-white" : "text-slate-900"}`}>
-                    Profile updates are stored in the database and mirrored to your local session cache.
+                    Your profile, learning state, and campus context are synced across sessions.
                   </p>
                 </div>
               </div>

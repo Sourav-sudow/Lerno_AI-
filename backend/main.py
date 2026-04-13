@@ -1,6 +1,9 @@
+import base64
+import io
 import json
 import re
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
 from dotenv import load_dotenv
 
@@ -19,6 +22,12 @@ import random
 import smtplib
 import time
 from email.mime.text import MIMEText
+from campus_data import (
+    build_profile_context,
+    build_starter_content_pack,
+    content_pack_doc_id,
+    resolve_campus_selection,
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_FIREBASE_CRED_FILENAME = "lerno-cd286-firebase-adminsdk-fbsvc-222d396b1f.json"
@@ -308,6 +317,24 @@ def default_avatar(email: str) -> str:
     return f"https://api.dicebear.com/7.x/notionists-neutral/svg?seed={email}"
 
 
+def is_valid_email_address(email: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", normalize_email(email)))
+
+
+def topic_override_doc_id(
+    university_id: str, subject_title: str, unit_title: str, topic_title: str
+) -> str:
+    key = "||".join(
+        [
+            (university_id or "").strip().lower(),
+            (subject_title or "").strip().lower(),
+            (unit_title or "").strip().lower(),
+            (topic_title or "").strip().lower(),
+        ]
+    )
+    return re.sub(r"[^a-z0-9|:_-]+", "-", key)
+
+
 def sanitize_topic_list(items: Any) -> List[Dict[str, Any]]:
     if not isinstance(items, list):
         return []
@@ -379,15 +406,445 @@ def default_learning_state() -> Dict[str, Any]:
     }
 
 
-def topic_override_doc_id(subject_title: str, unit_title: str, topic_title: str) -> str:
-    key = "||".join(
-        [
-            (subject_title or "").strip().lower(),
-            (unit_title or "").strip().lower(),
-            (topic_title or "").strip().lower(),
-        ]
+TRACKABLE_EVENT_TYPES = {
+    "signup_started",
+    "signup_completed",
+    "onboarding_completed",
+    "first_lesson_viewed",
+    "quiz_completed",
+    "share_clicked",
+    "referral_signup",
+}
+
+
+def sanitize_content_pack_subjects(subjects: Any) -> List[Dict[str, Any]]:
+    if not isinstance(subjects, list):
+        return []
+
+    sanitized_subjects: List[Dict[str, Any]] = []
+    for subject in subjects:
+        if not isinstance(subject, dict):
+            continue
+
+        subject_id = str(subject.get("id") or subject.get("title") or uuid.uuid4().hex[:8]).strip()
+        subject_title = str(subject.get("title") or subject_id).strip()
+        if not subject_title:
+            continue
+
+        units = []
+        for unit in subject.get("units", []) if isinstance(subject.get("units"), list) else []:
+            if not isinstance(unit, dict):
+                continue
+            unit_title = str(unit.get("title", "")).strip()
+            if not unit_title:
+                continue
+            units.append(
+                {
+                    "id": str(unit.get("id") or unit_title).strip().lower().replace(" ", "-"),
+                    "title": unit_title,
+                    "topics": [
+                        str(topic).strip()
+                        for topic in unit.get("topics", [])
+                        if str(topic).strip()
+                    ]
+                    if isinstance(unit.get("topics"), list)
+                    else [],
+                }
+            )
+
+        topics = []
+        for topic in subject.get("topics", []) if isinstance(subject.get("topics"), list) else []:
+            if isinstance(topic, str):
+                title = topic.strip()
+                narration = ""
+                video_url = ""
+            elif isinstance(topic, dict):
+                title = str(topic.get("title", "")).strip()
+                narration = str(topic.get("narration", "")).strip()
+                video_url = str(topic.get("videoUrl", "")).strip()
+            else:
+                continue
+
+            if not title:
+                continue
+
+            topics.append(
+                {
+                    "title": title,
+                    "narration": narration,
+                    "videoUrl": video_url,
+                }
+            )
+
+        sanitized_subjects.append(
+            {
+                "id": subject_id,
+                "title": subject_title,
+                "units": units,
+                "topics": topics,
+            }
+        )
+
+    return sanitized_subjects
+
+
+def safe_slug(value: str, fallback: str = "item") -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (value or "").strip().lower()).strip("-")
+    return slug or fallback
+
+
+def dedupe_strings(items: Any) -> List[str]:
+    seen = set()
+    deduped: List[str] = []
+    for item in items if isinstance(items, list) else []:
+        value = str(item).strip()
+        normalized = value.lower()
+        if not value or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(value)
+    return deduped
+
+
+def chunk_list(items: List[str], chunk_size: int) -> List[List[str]]:
+    return [items[index:index + chunk_size] for index in range(0, len(items), chunk_size)]
+
+
+def topic_count_from_subjects(subjects: Any) -> int:
+    total = 0
+    for subject in subjects if isinstance(subjects, list) else []:
+        if not isinstance(subject, dict):
+            continue
+        total += len(subject.get("topics", []) if isinstance(subject.get("topics"), list) else [])
+    return total
+
+
+def build_review_inbox_item(pack: Dict[str, Any]) -> Dict[str, Any]:
+    subjects = pack.get("subjects", []) if isinstance(pack.get("subjects"), list) else []
+    unit_count = 0
+    for subject in subjects:
+        if isinstance(subject, dict):
+            unit_count += len(subject.get("units", []) if isinstance(subject.get("units"), list) else [])
+
+    return {
+        "id": str(pack.get("id", "")).strip(),
+        "name": str(pack.get("name", "")).strip(),
+        "universityId": str(pack.get("universityId", "")).strip(),
+        "universityName": str(pack.get("universityName", "")).strip(),
+        "departmentName": str(pack.get("departmentName", "")).strip(),
+        "programName": str(pack.get("programName", "")).strip(),
+        "termName": str(pack.get("termName", "")).strip(),
+        "reviewStatus": str(pack.get("reviewStatus", "draft")).strip() or "draft",
+        "reviewNotes": str(pack.get("reviewNotes", "")).strip(),
+        "generatedByAI": bool(pack.get("generatedByAI")),
+        "subjectCount": len(subjects),
+        "unitCount": unit_count,
+        "topicCount": topic_count_from_subjects(subjects),
+        "source": str(pack.get("source", "")).strip(),
+        "ingestedBy": str(pack.get("ingestedBy", "")).strip(),
+        "reviewedBy": str(pack.get("reviewedBy", "")).strip(),
+        "reviewedAt": int(pack.get("reviewedAt", 0) or 0),
+        "updatedAt": int(pack.get("updatedAt", 0) or 0),
+    }
+
+
+def share_artifact_public_payload(artifact: Dict[str, Any]) -> Dict[str, Any]:
+    payload = artifact.get("payload", {}) if isinstance(artifact.get("payload"), dict) else {}
+    notes = dedupe_strings(payload.get("notes", []))[:6]
+    quiz_five = dedupe_strings(payload.get("fiveMarkQuestions", []))[:5]
+    quiz_ten = dedupe_strings(payload.get("tenMarkQuestions", []))[:5]
+
+    return {
+        "id": str(artifact.get("id", "")).strip(),
+        "artifactType": str(artifact.get("artifactType", "")).strip(),
+        "shareTitle": str(artifact.get("shareTitle", "")).strip(),
+        "shareText": str(artifact.get("shareText", "")).strip(),
+        "topicTitle": str(artifact.get("topicTitle", "")).strip(),
+        "subjectTitle": str(artifact.get("subjectTitle", "")).strip(),
+        "unitTitle": str(artifact.get("unitTitle", "")).strip(),
+        "universityId": str(artifact.get("universityId", "")).strip(),
+        "universitySlug": str(artifact.get("universitySlug", "")).strip(),
+        "universityName": str(artifact.get("universityName", "")).strip(),
+        "referralCode": str(artifact.get("referralCode", "")).strip(),
+        "createdAt": int(artifact.get("createdAt", 0) or 0),
+        "payload": {
+            "notes": notes,
+            "narration": str(payload.get("narration", "")).strip(),
+            "fiveMarkQuestions": quiz_five,
+            "tenMarkQuestions": quiz_ten,
+            "summary": str(payload.get("summary", "")).strip(),
+        },
+    }
+
+
+def extract_text_from_import_payload(
+    source_text: str = "",
+    file_name: str = "",
+    file_content_base64: str = "",
+) -> str:
+    if source_text.strip():
+        return source_text.strip()
+
+    if not file_content_base64.strip():
+        return ""
+
+    try:
+        binary = base64.b64decode(file_content_base64)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid file payload: {exc}") from exc
+
+    extension = os.path.splitext(file_name or "")[1].lower()
+    if extension == ".pdf":
+        try:
+            from pypdf import PdfReader
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="PDF import needs the pypdf package on the backend.",
+            ) from exc
+
+        try:
+            reader = PdfReader(io.BytesIO(binary))
+            return "\n".join((page.extract_text() or "") for page in reader.pages).strip()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Could not read PDF text: {exc}") from exc
+
+    try:
+        return binary.decode("utf-8", errors="ignore").strip()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not decode uploaded file: {exc}") from exc
+
+
+def parse_syllabus_text_to_subjects(raw_text: str, program_name: str = "") -> List[Dict[str, Any]]:
+    if not raw_text.strip():
+        return []
+
+    cleaned_text = (
+        raw_text.replace("\r", "\n")
+        .replace("\t", " ")
+        .replace("•", "\n")
+        .replace("▪", "\n")
+        .replace("●", "\n")
     )
-    return re.sub(r"[^a-z0-9|_-]+", "-", key)
+
+    lines = []
+    for raw_line in cleaned_text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        line = re.sub(r"^[\-\*\u2022\d\.\)\(]+\s*", "", line).strip()
+        if len(line) < 2:
+            continue
+        lines.append(line)
+
+    if not lines:
+        return []
+
+    subjects: List[Dict[str, Any]] = []
+    current_subject: Optional[Dict[str, Any]] = None
+    current_unit: Optional[Dict[str, Any]] = None
+
+    def ensure_subject(title: str):
+        nonlocal current_subject, current_unit
+        normalized_title = title.strip()
+        if not normalized_title:
+            return
+        current_subject = {
+            "id": safe_slug(normalized_title, f"subject-{len(subjects) + 1}"),
+            "title": normalized_title,
+            "units": [],
+            "topics": [],
+        }
+        subjects.append(current_subject)
+        current_unit = None
+
+    def ensure_unit(title: str):
+        nonlocal current_subject, current_unit
+        if current_subject is None:
+            ensure_subject(program_name or "Imported Subject")
+        normalized_title = title.strip()
+        if not normalized_title or current_subject is None:
+            return
+        current_unit = {
+            "id": safe_slug(normalized_title, f"unit-{len(current_subject['units']) + 1}"),
+            "title": normalized_title,
+            "topics": [],
+        }
+        current_subject["units"].append(current_unit)
+
+    def add_topic(title: str):
+        nonlocal current_subject, current_unit
+        normalized_title = title.strip(" -:")
+        if not normalized_title:
+            return
+        if current_subject is None:
+            ensure_subject(program_name or "Imported Subject")
+        if current_unit is None:
+            ensure_unit("Unit 1")
+        if current_subject is None or current_unit is None:
+            return
+        topic_payload = {
+            "title": normalized_title,
+            "narration": f"Imported from syllabus for {normalized_title}.",
+            "videoUrl": "",
+        }
+        current_subject["topics"].append(topic_payload)
+        current_unit["topics"].append(normalized_title)
+
+    for line in lines:
+        lower = line.lower()
+        subject_match = re.match(r"^(subject|course|paper)\s*[:\-]\s*(.+)$", line, flags=re.IGNORECASE)
+        unit_match = re.match(
+            r"^(unit|module|chapter)\s*(\d+|[ivx]+)?\s*[:\-]?\s*(.+)?$",
+            line,
+            flags=re.IGNORECASE,
+        )
+
+        if subject_match:
+            ensure_subject(subject_match.group(2))
+            continue
+
+        if (
+            not subject_match
+            and current_subject is None
+            and len(line.split()) <= 8
+            and line.upper() == line
+            and any(char.isalpha() for char in line)
+        ):
+            ensure_subject(line.title())
+            continue
+
+        if unit_match:
+            unit_index = unit_match.group(2) or str((len(current_subject.get("units", [])) + 1) if current_subject else 1)
+            unit_rest = (unit_match.group(3) or "").strip()
+            ensure_unit(f"Unit {unit_index}" + (f" - {unit_rest}" if unit_rest else ""))
+            continue
+
+        add_topic(line)
+
+    sanitized = sanitize_content_pack_subjects(subjects)
+    if sanitized:
+        return sanitized
+
+    fallback_title = program_name or "Imported Subject"
+    fallback_topics = dedupe_strings(lines)[:24]
+    if not fallback_topics:
+        return []
+
+    fallback_subject = {
+        "id": safe_slug(fallback_title, "imported-subject"),
+        "title": fallback_title,
+        "units": [],
+        "topics": [],
+    }
+    for index, topic_group in enumerate(chunk_list(fallback_topics, 4), start=1):
+        unit_title = f"Unit {index}"
+        fallback_subject["units"].append(
+            {
+                "id": safe_slug(unit_title, f"unit-{index}"),
+                "title": unit_title,
+                "topics": topic_group,
+            }
+        )
+        fallback_subject["topics"].extend(
+            {
+                "title": topic,
+                "narration": f"Imported from syllabus for {topic}.",
+                "videoUrl": "",
+            }
+            for topic in topic_group
+        )
+
+    return sanitize_content_pack_subjects([fallback_subject])
+
+
+def build_event_context(email: str = "", context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    context = context or {}
+    return {
+        "email": normalize_email(email) if email else "",
+        "universityId": str(context.get("universityId", "")).strip(),
+        "universitySlug": str(context.get("universitySlug", "")).strip(),
+        "departmentId": str(context.get("departmentId", "")).strip(),
+        "programId": str(context.get("programId", "")).strip(),
+        "termId": str(context.get("termId", "")).strip(),
+        "referralCode": str(context.get("referralCode", "")).strip(),
+        "verificationStatus": str(context.get("verificationStatus", "")).strip(),
+    }
+
+
+def log_event(
+    db,
+    event_type: str,
+    email: str = "",
+    context: Optional[Dict[str, Any]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+):
+    if event_type not in TRACKABLE_EVENT_TYPES:
+        return
+
+    event_payload = build_event_context(email, context)
+    event_payload.update(
+        {
+            "eventType": event_type,
+            "metadata": metadata or {},
+            "createdAt": now_ms(),
+        }
+    )
+    db.collection("analytics_events").document(uuid.uuid4().hex).set(event_payload)
+
+
+def event_day_key(timestamp_ms: int) -> str:
+    return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc).date().isoformat()
+
+
+def compute_streak_days(timestamps: List[int]) -> int:
+    if not timestamps:
+        return 0
+
+    unique_days = sorted({event_day_key(ts) for ts in timestamps}, reverse=True)
+    if not unique_days:
+        return 0
+
+    current = datetime.now(tz=timezone.utc).date()
+    if unique_days[0] not in {current.isoformat(), (current - timedelta(days=1)).isoformat()}:
+        return 0
+
+    streak = 0
+    expected_day = current if unique_days[0] == current.isoformat() else current - timedelta(days=1)
+    unique_day_set = set(unique_days)
+    while expected_day.isoformat() in unique_day_set:
+        streak += 1
+        expected_day -= timedelta(days=1)
+    return streak
+
+
+def leaderboard_rows(
+    users: List[Dict[str, Any]],
+    value_by_email: Dict[str, int],
+    label: str,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    ranked_users = sorted(
+        [
+            {
+                "email": user.get("email", ""),
+                "fullName": user.get("fullName") or user.get("email", "").split("@")[0],
+                "avatar": user.get("avatar") or default_avatar(user.get("email", "")),
+                "value": int(value_by_email.get(user.get("email", ""), 0)),
+                "label": label,
+            }
+            for user in users
+            if user.get("email") and int(value_by_email.get(user.get("email", ""), 0)) > 0
+        ],
+        key=lambda item: item["value"],
+        reverse=True,
+    )[:limit]
+
+    return [
+        {
+            "rank": index + 1,
+            **item,
+        }
+        for index, item in enumerate(ranked_users)
+    ]
 
 
 def ensure_firestore():
@@ -425,12 +882,17 @@ def firestore_guard(operation):
         raise HTTPException(status_code=503, detail=firestore_error_detail(exc)) from exc
 
 
-def serialize_user(user_data: Optional[Dict[str, Any]], email: str):
+def serialize_user(
+    user_data: Optional[Dict[str, Any]],
+    email: str,
+    pending_context: Optional[Dict[str, Any]] = None,
+):
     if not user_data:
-        return None
+        user_data = pending_context or {}
 
     normalized_email = normalize_email(email)
     role = user_data.get("role")
+    profile_context = build_profile_context(normalized_email, user_data, pending_context)
 
     return {
         "uid": user_data.get("uid") or user_doc_id(normalized_email),
@@ -440,17 +902,29 @@ def serialize_user(user_data: Optional[Dict[str, Any]], email: str):
         "phone": user_data.get("phone") or "",
         "avatar": user_data.get("avatar") or default_avatar(normalized_email),
         "isOnboarded": bool(user_data.get("isOnboarded")),
-        "course": user_data.get("course") or "",
+        "course": user_data.get("course") or profile_context.get("programName") or "",
         "year": user_data.get("year") or "",
-        "semester": user_data.get("semester") or "",
-        "department": user_data.get("department") or "",
+        "semester": user_data.get("semester") or profile_context.get("termName") or "",
+        "department": user_data.get("department") or profile_context.get("departmentName") or "",
         "designation": user_data.get("designation") or "",
+        "universityId": profile_context.get("universityId") or "",
+        "universitySlug": profile_context.get("universitySlug") or "",
+        "universityName": profile_context.get("universityName") or "",
+        "departmentId": profile_context.get("departmentId") or "",
+        "departmentName": profile_context.get("departmentName") or "",
+        "programId": profile_context.get("programId") or "",
+        "programName": profile_context.get("programName") or "",
+        "termId": profile_context.get("termId") or "",
+        "termName": profile_context.get("termName") or "",
+        "verificationStatus": profile_context.get("verificationStatus") or "",
+        "referralCode": profile_context.get("referralCode") or "",
+        "referredByCode": profile_context.get("referredByCode") or "",
         "createdAt": int(user_data.get("createdAt", now_ms())),
         "updatedAt": int(user_data.get("updatedAt", now_ms())),
     }
 
 
-def build_session_payload(email: str):
+def build_session_payload(email: str, pending_context: Optional[Dict[str, Any]] = None):
     normalized_email = normalize_email(email)
     db = ensure_firestore()
     doc_id = user_doc_id(normalized_email)
@@ -486,7 +960,12 @@ def build_session_payload(email: str):
             }
         )
 
-        serialized_user = serialize_user(user_data, normalized_email)
+        serialized_user = (
+            serialize_user(user_data, normalized_email, pending_context)
+            if user_data or pending_context
+            else None
+        )
+        session_context = build_profile_context(normalized_email, user_data, pending_context)
 
         return {
             "isAuthenticated": True,
@@ -497,6 +976,13 @@ def build_session_payload(email: str):
             "profile": serialized_user,
             "preferences": preferences,
             "learningState": learning_state,
+            "universityId": session_context.get("universityId", ""),
+            "universitySlug": session_context.get("universitySlug", ""),
+            "departmentId": session_context.get("departmentId", ""),
+            "programId": session_context.get("programId", ""),
+            "termId": session_context.get("termId", ""),
+            "verificationStatus": session_context.get("verificationStatus", ""),
+            "referralCode": session_context.get("referralCode", ""),
         }
 
     return firestore_guard(run)
@@ -504,11 +990,6 @@ def build_session_payload(email: str):
 
 def normalize_email(email: str) -> str:
     return email.strip().lower()
-
-
-def is_valid_college_email(email: str) -> bool:
-    return bool(re.fullmatch(r"[A-Za-z0-9._%+-]+@krmu\.edu\.in", normalize_email(email)))
-
 
 def generate_otp() -> str:
     return f"{random.randint(0, 999999):06d}"
@@ -864,11 +1345,30 @@ class prompt(BaseModel):
 class OTPRequest(BaseModel):
     email: str
     mode: Optional[Literal["login", "signup"]] = "login"
+    role: Optional[Literal["student", "faculty"]] = None
+    universityId: str = ""
+    universitySlug: str = ""
+    departmentId: str = ""
+    programId: str = ""
+    termId: str = ""
+    referralCode: str = ""
+    referredByCode: str = ""
+    otpChannel: Optional[Literal["email"]] = "email"
 
 
 class VerifyOTPRequest(BaseModel):
     email: str
     otp: str
+    mode: Optional[Literal["login", "signup"]] = "login"
+    role: Optional[Literal["student", "faculty"]] = None
+    universityId: str = ""
+    universitySlug: str = ""
+    departmentId: str = ""
+    programId: str = ""
+    termId: str = ""
+    referralCode: str = ""
+    referredByCode: str = ""
+    otpChannel: Optional[Literal["email"]] = "email"
 
 
 class OnboardingRequest(BaseModel):
@@ -882,6 +1382,15 @@ class OnboardingRequest(BaseModel):
     semester: str = ""
     department: str = ""
     designation: str = ""
+    universityId: str = ""
+    universitySlug: str = ""
+    departmentId: str = ""
+    programId: str = ""
+    termId: str = ""
+    verificationStatus: str = ""
+    referralCode: str = ""
+    referredByCode: str = ""
+    otpChannel: Optional[Literal["email"]] = "email"
 
 
 class ProfileUpdateRequest(BaseModel):
@@ -894,6 +1403,14 @@ class ProfileUpdateRequest(BaseModel):
     semester: str = ""
     department: str = ""
     designation: str = ""
+    universityId: str = ""
+    universitySlug: str = ""
+    departmentId: str = ""
+    programId: str = ""
+    termId: str = ""
+    verificationStatus: str = ""
+    referralCode: str = ""
+    referredByCode: str = ""
 
 
 class PreferencesUpdateRequest(BaseModel):
@@ -915,37 +1432,297 @@ class TopicVideoOverrideRequest(BaseModel):
     unitTitle: str
     topicTitle: str
     videoUrl: str
+    universityId: str = ""
+
+
+class EventTrackRequest(BaseModel):
+    eventType: Literal[
+        "signup_started",
+        "signup_completed",
+        "onboarding_completed",
+        "first_lesson_viewed",
+        "quiz_completed",
+        "share_clicked",
+        "referral_signup",
+    ]
+    email: str = ""
+    universityId: str = ""
+    universitySlug: str = ""
+    departmentId: str = ""
+    programId: str = ""
+    termId: str = ""
+    referralCode: str = ""
+    verificationStatus: str = ""
+    metadata: Dict[str, Any] = {}
+
+
+class ContentPackUpsertRequest(BaseModel):
+    facultyEmail: str
+    universityId: str = ""
+    universitySlug: str = ""
+    departmentId: str
+    programId: str
+    termId: str
+    packName: str = ""
+    reviewStatus: Literal["draft", "review", "approved"] = "approved"
+    reviewNotes: str = ""
+    generatedByAI: bool = False
+    subjects: List[Dict[str, Any]]
+
+
+class ShareArtifactCreateRequest(BaseModel):
+    email: str
+    artifactType: Literal["topic", "notes", "explainer", "quiz"]
+    topicTitle: str
+    subjectTitle: str = ""
+    unitTitle: str = ""
+    shareTitle: str = ""
+    shareText: str = ""
+    universityId: str = ""
+    universitySlug: str = ""
+    departmentId: str = ""
+    programId: str = ""
+    termId: str = ""
+    referralCode: str = ""
+    payload: Dict[str, Any] = {}
+
+
+class StudyPlannerRequest(BaseModel):
+    email: str = ""
+    universityId: str = ""
+    universitySlug: str = ""
+    departmentId: str = ""
+    programId: str = ""
+    termId: str = ""
+    subjectTitle: str = ""
+    topicTitles: List[str] = []
+    completedPracticeTopics: List[str] = []
+    examDate: str
+    dailyMinutes: int = 60
+    confidenceLevel: Literal["low", "medium", "high"] = "medium"
+
+
+class ReviewActionRequest(BaseModel):
+    facultyEmail: str
+    contentPackId: str
+    action: Literal["approve", "request_changes", "save_draft"]
+    reviewNotes: str = ""
+
+
+class SyllabusImportRequest(BaseModel):
+    facultyEmail: str
+    universityId: str = ""
+    universitySlug: str = ""
+    departmentId: str = ""
+    programId: str
+    termId: str
+    sourceText: str = ""
+    fileName: str = ""
+    fileContentBase64: str = ""
+
+
+def build_request_context(
+    email: str = "",
+    university_id: str = "",
+    university_slug: str = "",
+    department_id: str = "",
+    program_id: str = "",
+    term_id: str = "",
+    department_name: str = "",
+    course: str = "",
+    semester: str = "",
+    referral_code: str = "",
+    referred_by_code: str = "",
+    verification_status: str = "",
+    role: Optional[str] = None,
+):
+    context = build_profile_context(
+        normalize_email(email),
+        {
+            "universityId": university_id,
+            "universitySlug": university_slug,
+            "departmentId": department_id,
+            "programId": program_id,
+            "termId": term_id,
+            "department": department_name,
+            "course": course,
+            "semester": semester,
+            "referralCode": referral_code,
+            "referredByCode": referred_by_code,
+            "verificationStatus": verification_status,
+            "role": role or "",
+        },
+    )
+    if role:
+        context["role"] = role
+    return context
+
+
+def get_or_seed_content_pack(db, selection: Dict[str, Any]):
+    doc_id = content_pack_doc_id(
+        selection.get("universityId", ""),
+        selection.get("programId", ""),
+        selection.get("termId", ""),
+    )
+    pack_ref = db.collection("campus_content_packs").document(doc_id)
+    pack_doc = pack_ref.get()
+    if pack_doc.exists:
+        return pack_doc.to_dict() or {}
+
+    starter_pack = build_starter_content_pack(
+        selection.get("universityId", ""),
+        selection.get("universitySlug", ""),
+        selection.get("departmentId", ""),
+        selection.get("programId", ""),
+        selection.get("termId", ""),
+    )
+    if starter_pack:
+        starter_pack["updatedAt"] = now_ms()
+        pack_ref.set(starter_pack, merge=True)
+        return starter_pack
+
+    return None
+
+
+def build_study_plan_response(item: StudyPlannerRequest) -> Dict[str, Any]:
+    try:
+        exam_date = datetime.strptime(item.examDate, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Exam date must be in YYYY-MM-DD format.") from exc
+
+    today = datetime.now(timezone.utc).date()
+    days_until_exam = max((exam_date - today).days, 0)
+    all_topics = dedupe_strings(item.topicTitles)
+    completed_topics = {topic.lower() for topic in dedupe_strings(item.completedPracticeTopics)}
+    pending_topics = [topic for topic in all_topics if topic.lower() not in completed_topics]
+    if not pending_topics:
+        pending_topics = all_topics or [item.subjectTitle or "Core revision"]
+
+    plan_days = max(1, min(7, days_until_exam + 1 if days_until_exam <= 14 else 7))
+    daily_minutes = max(20, min(item.dailyMinutes, 240))
+    per_day_groups = chunk_list(pending_topics, max(1, (len(pending_topics) + plan_days - 1) // plan_days))
+
+    if days_until_exam <= 2:
+        urgency = "critical"
+    elif days_until_exam <= 7:
+        urgency = "high"
+    else:
+        urgency = "steady"
+
+    confidence_notes = {
+        "low": "Start with high-yield summaries, then solve one easy practice set daily.",
+        "medium": "Balance concept revision with exam-style answers and one recall sprint.",
+        "high": "Keep revision short and spend more time on timed answers and weak-topic cleanup.",
+    }
+
+    daily_plan = []
+    for index in range(plan_days):
+        date_for_day = today + timedelta(days=index)
+        day_topics = per_day_groups[index] if index < len(per_day_groups) else []
+        label = "Exam Day" if date_for_day == exam_date else f"Day {index + 1}"
+        checkpoint = (
+            "Timed recall + short answer writing"
+            if date_for_day == exam_date
+            else "Finish revision and close with one quick recap"
+        )
+        daily_plan.append(
+            {
+                "dayLabel": label,
+                "date": date_for_day.isoformat(),
+                "focus": (
+                    "Final exam polish"
+                    if date_for_day == exam_date
+                    else f"{item.subjectTitle or 'Subject'} revision block"
+                ),
+                "topicTitles": day_topics,
+                "minutes": daily_minutes,
+                "checkpoint": checkpoint,
+            }
+        )
+
+    quick_wins = [
+        f"Revise {pending_topics[0]} first because it anchors the current subject."
+        if pending_topics
+        else "Start with one high-yield topic before touching long notes.",
+        confidence_notes[item.confidenceLevel],
+        "End each session with a 10-minute self-test or verbal recap.",
+    ]
+
+    return {
+        "success": True,
+        "plan": {
+            "mode": "exam_week" if days_until_exam <= 7 else "study_planner",
+            "daysUntilExam": days_until_exam,
+            "examDate": exam_date.isoformat(),
+            "urgency": urgency,
+            "subjectTitle": item.subjectTitle,
+            "priorityTopics": pending_topics[:6],
+            "completedTopics": [topic for topic in all_topics if topic.lower() in completed_topics],
+            "dailyPlan": daily_plan,
+            "quickWins": quick_wins,
+            "finalRevisionChecklist": [
+                "Review your top 3 weak topics once more.",
+                "Write at least two answers in exam format.",
+                "Keep one-page notes for formulas, frameworks, or definitions.",
+                "Sleep on time before the exam day.",
+            ],
+            "summary": (
+                f"{days_until_exam} day{'s' if days_until_exam != 1 else ''} left. "
+                f"Focus on {len(pending_topics[:6])} priority topics with {daily_minutes} minutes per day."
+            ),
+        },
+    }
 
 
 @app.post("/send-otp")
 async def send_otp(item: OTPRequest):
     email = normalize_email(item.email)
     mode = item.mode or "login"
+    pending_context = build_request_context(
+        email=email,
+        university_id=item.universityId,
+        university_slug=item.universitySlug,
+        department_id=item.departmentId,
+        program_id=item.programId,
+        term_id=item.termId,
+        referral_code=item.referralCode,
+        referred_by_code=item.referredByCode,
+        role=item.role,
+    )
 
-    if not is_valid_college_email(email):
+    if not is_valid_email_address(email):
         raise HTTPException(
             status_code=400,
-            detail="Please use your college email (e.g., 2301201171@krmu.edu.in)",
+            detail="Please enter a valid university or personal email address.",
         )
 
+    db = ensure_firestore()
+    doc_id = user_doc_id(email)
+
+    def lookup_user():
+        return db.collection("users").document(doc_id).get()
+
+    user_doc = firestore_guard(lookup_user)
+    existing_data = user_doc.to_dict() or {}
+
     if mode == "login":
-        db = ensure_firestore()
-        doc_id = user_doc_id(email)
-
-        def lookup_user():
-            return db.collection("users").document(doc_id).get()
-
-        user_doc = firestore_guard(lookup_user)
         if not user_doc.exists:
             raise HTTPException(
                 status_code=404,
                 detail="No account found for this email. Please sign up first.",
             )
+    elif user_doc.exists and bool(existing_data.get("isOnboarded")):
+        raise HTTPException(
+            status_code=409,
+            detail="An account already exists for this email. Please login instead.",
+        )
 
     otp = generate_otp()
     otp_store[email] = {
         "otp": otp,
         "expires_at": time.time() + OTP_EXPIRY_SECONDS,
+        "mode": mode,
+        "context": pending_context,
     }
 
     email_sent = send_otp_email(email, otp)
@@ -960,6 +1737,18 @@ async def send_otp(item: OTPRequest):
         response["message"] = "OTP generated in demo mode. Check backend console if email is not configured."
         response["debug_otp"] = otp
 
+    if mode == "signup":
+        try:
+            log_event(
+                db,
+                "signup_started",
+                email=email,
+                context=pending_context,
+                metadata={"otpChannel": item.otpChannel or "email", "role": item.role or ""},
+            )
+        except Exception:
+            pass
+
     return response
 
 
@@ -967,6 +1756,17 @@ async def send_otp(item: OTPRequest):
 async def verify_otp(item: VerifyOTPRequest):
     email = normalize_email(item.email)
     otp = item.otp.strip()
+    pending_context = build_request_context(
+        email=email,
+        university_id=item.universityId,
+        university_slug=item.universitySlug,
+        department_id=item.departmentId,
+        program_id=item.programId,
+        term_id=item.termId,
+        referral_code=item.referralCode,
+        referred_by_code=item.referredByCode,
+        role=item.role,
+    )
 
     stored = otp_store.get(email)
     if not stored:
@@ -980,7 +1780,21 @@ async def verify_otp(item: VerifyOTPRequest):
         raise HTTPException(status_code=400, detail="Invalid OTP. Please try again.")
 
     otp_store.pop(email, None)
-    session = build_session_payload(email)
+    session = build_session_payload(email, stored.get("context") or pending_context)
+
+    if (item.mode or stored.get("mode") or "login") == "signup":
+        db = ensure_firestore()
+        try:
+            log_event(
+                db,
+                "signup_completed",
+                email=email,
+                context=stored.get("context") or pending_context,
+                metadata={"otpChannel": item.otpChannel or "email", "role": item.role or ""},
+            )
+        except Exception:
+            pass
+
     return {
         "success": True,
         "message": "OTP verified successfully.",
@@ -996,8 +1810,8 @@ async def verify_otp(item: VerifyOTPRequest):
 async def get_session_me(email: str = Query(...)):
     normalized_email = normalize_email(email)
 
-    if not is_valid_college_email(normalized_email):
-        raise HTTPException(status_code=400, detail="Please use your college email.")
+    if not is_valid_email_address(normalized_email):
+        raise HTTPException(status_code=400, detail="Please enter a valid email.")
 
     return {
         "success": True,
@@ -1009,8 +1823,8 @@ async def get_session_me(email: str = Query(...)):
 async def complete_onboarding(item: OnboardingRequest):
     normalized_email = normalize_email(item.email)
 
-    if not is_valid_college_email(normalized_email):
-        raise HTTPException(status_code=400, detail="Please use your college email.")
+    if not is_valid_email_address(normalized_email):
+        raise HTTPException(status_code=400, detail="Please enter a valid email.")
 
     full_name = item.fullName.strip()
     if len(full_name) < 2:
@@ -1023,6 +1837,30 @@ async def complete_onboarding(item: OnboardingRequest):
     db = ensure_firestore()
     doc_id = user_doc_id(normalized_email)
     timestamp = now_ms()
+    request_context = build_request_context(
+        email=normalized_email,
+        university_id=item.universityId,
+        university_slug=item.universitySlug,
+        department_id=item.departmentId,
+        program_id=item.programId,
+        term_id=item.termId,
+        department_name=item.department,
+        course=item.course,
+        semester=item.semester,
+        referral_code=item.referralCode,
+        referred_by_code=item.referredByCode,
+        verification_status=item.verificationStatus,
+        role=item.role,
+    )
+
+    if not request_context.get("universityId"):
+        raise HTTPException(status_code=400, detail="Please choose a university.")
+    if not request_context.get("departmentId"):
+        raise HTTPException(status_code=400, detail="Please choose a department family.")
+    if item.role == "student" and (
+        not request_context.get("programId") or not request_context.get("termId")
+    ):
+        raise HTTPException(status_code=400, detail="Please choose a program and term.")
 
     payload = {
         "uid": doc_id,
@@ -1033,15 +1871,27 @@ async def complete_onboarding(item: OnboardingRequest):
         "avatar": item.avatar.strip() or default_avatar(normalized_email),
         "isOnboarded": True,
         "updatedAt": timestamp,
+        "universityId": request_context.get("universityId", ""),
+        "universitySlug": request_context.get("universitySlug", ""),
+        "universityName": request_context.get("universityName", ""),
+        "departmentId": request_context.get("departmentId", ""),
+        "departmentName": request_context.get("departmentName", ""),
+        "programId": request_context.get("programId", ""),
+        "programName": request_context.get("programName", ""),
+        "termId": request_context.get("termId", ""),
+        "termName": request_context.get("termName", ""),
+        "verificationStatus": request_context.get("verificationStatus", ""),
+        "referralCode": request_context.get("referralCode", ""),
+        "referredByCode": request_context.get("referredByCode", ""),
     }
 
     if item.role == "student":
         payload.update(
             {
-                "course": item.course.strip(),
+                "course": request_context.get("programName", item.course.strip()),
                 "year": item.year.strip(),
-                "semester": item.semester.strip(),
-                "department": item.department.strip(),
+                "semester": request_context.get("termName", item.semester.strip()),
+                "department": request_context.get("departmentName", item.department.strip()),
                 "designation": "",
             }
         )
@@ -1050,8 +1900,8 @@ async def complete_onboarding(item: OnboardingRequest):
             {
                 "course": "",
                 "year": "",
-                "semester": "",
-                "department": item.department.strip(),
+                "semester": request_context.get("termName", ""),
+                "department": request_context.get("departmentName", item.department.strip()),
                 "designation": item.designation.strip(),
             }
         )
@@ -1070,6 +1920,25 @@ async def complete_onboarding(item: OnboardingRequest):
         learning_ref = db.collection("learning_sessions").document(doc_id)
         if not learning_ref.get().exists:
             learning_ref.set(default_learning_state(), merge=True)
+
+        try:
+            log_event(
+                db,
+                "onboarding_completed",
+                email=normalized_email,
+                context=request_context,
+                metadata={"role": item.role},
+            )
+            if request_context.get("referredByCode"):
+                log_event(
+                    db,
+                    "referral_signup",
+                    email=normalized_email,
+                    context=request_context,
+                    metadata={"referredByCode": request_context.get("referredByCode", "")},
+                )
+        except Exception:
+            pass
 
     firestore_guard(run)
 
@@ -1109,20 +1978,51 @@ async def update_profile(item: ProfileUpdateRequest):
         "avatar": item.avatar.strip() or existing_data.get("avatar") or default_avatar(normalized_email),
         "updatedAt": now_ms(),
     }
+    request_context = build_request_context(
+        email=normalized_email,
+        university_id=item.universityId or str(existing_data.get("universityId", "")),
+        university_slug=item.universitySlug or str(existing_data.get("universitySlug", "")),
+        department_id=item.departmentId or str(existing_data.get("departmentId", "")),
+        program_id=item.programId or str(existing_data.get("programId", "")),
+        term_id=item.termId or str(existing_data.get("termId", "")),
+        department_name=item.department or str(existing_data.get("departmentName", existing_data.get("department", ""))),
+        course=item.course or str(existing_data.get("programName", existing_data.get("course", ""))),
+        semester=item.semester or str(existing_data.get("termName", existing_data.get("semester", ""))),
+        referral_code=item.referralCode or str(existing_data.get("referralCode", "")),
+        referred_by_code=item.referredByCode or str(existing_data.get("referredByCode", "")),
+        verification_status=item.verificationStatus or str(existing_data.get("verificationStatus", "")),
+        role=str(role),
+    )
+    payload.update(
+        {
+            "universityId": request_context.get("universityId", ""),
+            "universitySlug": request_context.get("universitySlug", ""),
+            "universityName": request_context.get("universityName", ""),
+            "departmentId": request_context.get("departmentId", ""),
+            "departmentName": request_context.get("departmentName", ""),
+            "programId": request_context.get("programId", ""),
+            "programName": request_context.get("programName", ""),
+            "termId": request_context.get("termId", ""),
+            "termName": request_context.get("termName", ""),
+            "verificationStatus": request_context.get("verificationStatus", ""),
+            "referralCode": request_context.get("referralCode", ""),
+            "referredByCode": request_context.get("referredByCode", ""),
+        }
+    )
 
     if role == "student":
         payload.update(
             {
-                "course": item.course.strip(),
+                "course": request_context.get("programName", item.course.strip()),
                 "year": item.year.strip(),
-                "semester": item.semester.strip(),
-                "department": item.department.strip(),
+                "semester": request_context.get("termName", item.semester.strip()),
+                "department": request_context.get("departmentName", item.department.strip()),
             }
         )
     else:
         payload.update(
             {
-                "department": item.department.strip(),
+                "department": request_context.get("departmentName", item.department.strip()),
                 "designation": item.designation.strip(),
             }
         )
@@ -1208,19 +2108,25 @@ async def get_faculty_dashboard(email: str = Query(...)):
 
     users_collection = db.collection("users")
     users = firestore_guard(lambda: [doc.to_dict() or {} for doc in users_collection.stream()])
+    campus_users = [
+        user
+        for user in users
+        if user.get("universityId") == session.get("universityId")
+    ] or users
 
-    student_users = [user for user in users if user.get("role") == "student"]
-    faculty_users = [user for user in users if user.get("role") == "faculty"]
+    student_users = [user for user in campus_users if user.get("role") == "student"]
+    faculty_users = [user for user in campus_users if user.get("role") == "faculty"]
     week_ago = now_ms() - 7 * 24 * 60 * 60 * 1000
     new_users_this_week = sum(
-        1 for user in users if int(user.get("createdAt", 0)) >= week_ago
+        1 for user in campus_users if int(user.get("createdAt", 0)) >= week_ago
     )
 
     recent_onboardings = sorted(
-        users,
+        campus_users,
         key=lambda user: int(user.get("createdAt", 0)),
         reverse=True,
     )[:5]
+    content_pack = firestore_guard(lambda: get_or_seed_content_pack(db, session))
 
     return {
         "facultyProfile": session.get("profile"),
@@ -1233,21 +2139,23 @@ async def get_faculty_dashboard(email: str = Query(...)):
             serialize_user(user, user.get("email", "")) for user in recent_onboardings if user.get("email")
         ],
         "assignedSubjects": [
-            "Onboarding Oversight",
-            "Learning Analytics Review",
-            "Managed Subjects Coming Soon",
-        ],
+            subject.get("title", "")
+            for subject in (content_pack or {}).get("subjects", [])[:5]
+            if subject.get("title")
+        ]
+        or ["Pilot content pack not published yet"],
     }
 
 
 @app.get("/topic-video-override")
 async def get_topic_video_override(
+    universityId: str = Query(""),
     subjectTitle: str = Query(...),
     unitTitle: str = Query(...),
     topicTitle: str = Query(...),
 ):
     db = ensure_firestore()
-    doc_id = topic_override_doc_id(subjectTitle, unitTitle, topicTitle)
+    doc_id = topic_override_doc_id(universityId, subjectTitle, unitTitle, topicTitle)
     override_ref = db.collection("topic_video_overrides").document(doc_id)
     override_doc = firestore_guard(lambda: override_ref.get())
 
@@ -1261,6 +2169,7 @@ async def get_topic_video_override(
     return {
         "success": True,
         "override": {
+            "universityId": data.get("universityId", ""),
             "subjectTitle": data.get("subjectTitle", ""),
             "unitTitle": data.get("unitTitle", ""),
             "topicTitle": data.get("topicTitle", ""),
@@ -1285,6 +2194,7 @@ async def list_topic_video_overrides(email: str = Query(...)):
     overrides = sorted(
         [
             {
+                "universityId": doc.get("universityId", ""),
                 "subjectTitle": doc.get("subjectTitle", ""),
                 "unitTitle": doc.get("unitTitle", ""),
                 "topicTitle": doc.get("topicTitle", ""),
@@ -1294,6 +2204,7 @@ async def list_topic_video_overrides(email: str = Query(...)):
             }
             for doc in docs
             if doc.get("videoUrl")
+            and doc.get("universityId") == session.get("universityId")
         ],
         key=lambda item: item.get("updatedAt", 0),
         reverse=True,
@@ -1322,12 +2233,14 @@ async def save_topic_video_override(item: TopicVideoOverrideRequest):
     if not all([subject_title, unit_title, topic_title, video_url]):
         raise HTTPException(status_code=400, detail="Subject, unit, topic, and video URL are required.")
 
-    doc_id = topic_override_doc_id(subject_title, unit_title, topic_title)
+    university_id = session.get("universityId") or item.universityId
+    doc_id = topic_override_doc_id(university_id, subject_title, unit_title, topic_title)
     override_ref = db.collection("topic_video_overrides").document(doc_id)
 
     firestore_guard(
         lambda: override_ref.set(
             {
+                "universityId": university_id,
                 "subjectTitle": subject_title,
                 "unitTitle": unit_title,
                 "topicTitle": topic_title,
@@ -1343,6 +2256,466 @@ async def save_topic_video_override(item: TopicVideoOverrideRequest):
         "success": True,
         "message": "Faculty video saved successfully.",
     }
+
+
+@app.post("/events")
+async def track_event(item: EventTrackRequest):
+    db = ensure_firestore()
+    context = build_request_context(
+        email=item.email,
+        university_id=item.universityId,
+        university_slug=item.universitySlug,
+        department_id=item.departmentId,
+        program_id=item.programId,
+        term_id=item.termId,
+        referral_code=item.referralCode,
+        verification_status=item.verificationStatus,
+    )
+
+    firestore_guard(
+        lambda: log_event(
+            db,
+            item.eventType,
+            email=item.email,
+            context=context,
+            metadata=item.metadata or {},
+        )
+    )
+
+    return {"success": True}
+
+
+@app.get("/campus/growth")
+async def get_campus_growth(email: str = Query(...)):
+    normalized_email = normalize_email(email)
+    db = ensure_firestore()
+    session = build_session_payload(normalized_email)
+    university_id = session.get("universityId")
+
+    if not university_id:
+        raise HTTPException(status_code=400, detail="Campus context is missing for this user.")
+
+    users = firestore_guard(
+        lambda: [doc.to_dict() or {} for doc in db.collection("users").stream()]
+    )
+    campus_users = [
+        user
+        for user in users
+        if user.get("email") and user.get("universityId") == university_id
+    ]
+    student_users = [user for user in campus_users if user.get("role") == "student"]
+    user_by_email = {str(user.get("email", "")).strip().lower(): user for user in campus_users}
+    referral_code_to_email = {
+        str(user.get("referralCode", "")).strip().upper(): str(user.get("email", "")).strip().lower()
+        for user in campus_users
+        if str(user.get("referralCode", "")).strip()
+    }
+
+    events = firestore_guard(
+        lambda: [doc.to_dict() or {} for doc in db.collection("analytics_events").stream()]
+    )
+    campus_events = [
+        event
+        for event in events
+        if event.get("universityId") == university_id
+    ]
+
+    referral_counts: Dict[str, int] = {}
+    quiz_counts: Dict[str, int] = {}
+    lesson_timestamps: Dict[str, List[int]] = {}
+    share_topic_counts: Dict[str, int] = {}
+
+    week_ago_ms = now_ms() - 7 * 24 * 60 * 60 * 1000
+    weekly_active_emails = set()
+
+    for event in campus_events:
+        event_type = str(event.get("eventType", "")).strip()
+        event_email = normalize_email(str(event.get("email", "")).strip()) if event.get("email") else ""
+        metadata = event.get("metadata", {}) if isinstance(event.get("metadata"), dict) else {}
+        created_at = int(event.get("createdAt", 0) or 0)
+
+        if created_at >= week_ago_ms and event_email:
+            weekly_active_emails.add(event_email)
+
+        if event_type == "referral_signup":
+            referred_by_code = str(metadata.get("referredByCode", "")).strip().upper()
+            referred_email = referral_code_to_email.get(referred_by_code)
+            if referred_email:
+                referral_counts[referred_email] = referral_counts.get(referred_email, 0) + 1
+        elif event_type == "quiz_completed" and event_email:
+            quiz_counts[event_email] = quiz_counts.get(event_email, 0) + 1
+        elif event_type == "first_lesson_viewed" and event_email:
+            lesson_timestamps.setdefault(event_email, []).append(created_at)
+        elif event_type == "share_clicked":
+            topic_title = str(metadata.get("topicTitle", "")).strip()
+            if topic_title:
+                share_topic_counts[topic_title] = share_topic_counts.get(topic_title, 0) + 1
+
+    streak_counts = {
+        email_key: compute_streak_days(timestamps)
+        for email_key, timestamps in lesson_timestamps.items()
+    }
+
+    my_email = normalized_email
+    my_profile = user_by_email.get(my_email, {})
+    my_referral_code = str(
+        session.get("referralCode")
+        or (session.get("profile") or {}).get("referralCode")
+        or my_profile.get("referralCode", "")
+    ).strip()
+
+    weekly_target = 150
+    weekly_active_students = len(
+        {
+            active_email
+            for active_email in weekly_active_emails
+            if (user_by_email.get(active_email) or {}).get("role") == "student"
+        }
+    )
+
+    return {
+        "success": True,
+        "leaderboards": {
+            "referrals": leaderboard_rows(student_users, referral_counts, "referrals"),
+            "streaks": leaderboard_rows(student_users, streak_counts, "day streak"),
+            "quizzes": leaderboard_rows(student_users, quiz_counts, "quizzes"),
+        },
+        "ambassadorMetrics": {
+            "inviteCount": referral_counts.get(my_email, 0),
+            "referralCode": my_referral_code,
+            "topSharedContent": [
+                {"topicTitle": topic_title, "shares": count}
+                for topic_title, count in sorted(
+                    share_topic_counts.items(), key=lambda item: item[1], reverse=True
+                )[:5]
+            ],
+            "weeklyActivationProgress": {
+                "activeStudents": weekly_active_students,
+                "targetStudents": weekly_target,
+                "progressPercent": min(
+                    100,
+                    round((weekly_active_students / weekly_target) * 100) if weekly_target else 0,
+                ),
+            },
+            "streakDays": streak_counts.get(my_email, 0),
+            "quizzesCompleted": quiz_counts.get(my_email, 0),
+        },
+    }
+
+
+@app.post("/share-artifacts")
+async def create_share_artifact(item: ShareArtifactCreateRequest):
+    normalized_email = normalize_email(item.email)
+    if not is_valid_email_address(normalized_email):
+        raise HTTPException(status_code=400, detail="Please enter a valid email.")
+
+    session = build_session_payload(normalized_email)
+    if not session.get("exists") or not session.get("isOnboarded"):
+        raise HTTPException(status_code=403, detail="Only onboarded users can create share links.")
+
+    db = ensure_firestore()
+    context = build_request_context(
+        email=normalized_email,
+        university_id=item.universityId or str(session.get("universityId", "")),
+        university_slug=item.universitySlug or str(session.get("universitySlug", "")),
+        department_id=item.departmentId or str(session.get("departmentId", "")),
+        program_id=item.programId or str(session.get("programId", "")),
+        term_id=item.termId or str(session.get("termId", "")),
+        referral_code=item.referralCode or str(session.get("referralCode", "")),
+        verification_status=str(session.get("verificationStatus", "")),
+        role=str(session.get("role", "")),
+    )
+
+    share_id = uuid.uuid4().hex[:12]
+    artifact_payload = {
+        "id": share_id,
+        "artifactType": item.artifactType,
+        "email": normalized_email,
+        "topicTitle": item.topicTitle.strip(),
+        "subjectTitle": item.subjectTitle.strip(),
+        "unitTitle": item.unitTitle.strip(),
+        "shareTitle": item.shareTitle.strip() or item.topicTitle.strip(),
+        "shareText": item.shareText.strip(),
+        "universityId": context.get("universityId", ""),
+        "universitySlug": context.get("universitySlug", ""),
+        "universityName": context.get("universityName", ""),
+        "programId": context.get("programId", ""),
+        "termId": context.get("termId", ""),
+        "referralCode": context.get("referralCode", ""),
+        "payload": item.payload if isinstance(item.payload, dict) else {},
+        "createdAt": now_ms(),
+    }
+
+    firestore_guard(
+        lambda: db.collection("share_artifacts").document(share_id).set(artifact_payload, merge=True)
+    )
+
+    return {
+        "success": True,
+        "shareArtifact": share_artifact_public_payload(artifact_payload),
+    }
+
+
+@app.get("/share-artifacts/{share_id}")
+async def get_share_artifact(share_id: str):
+    db = ensure_firestore()
+    artifact_doc = firestore_guard(
+        lambda: db.collection("share_artifacts").document(share_id.strip()).get()
+    )
+    if not artifact_doc.exists:
+        raise HTTPException(status_code=404, detail="Shared artifact not found.")
+
+    artifact = artifact_doc.to_dict() or {}
+    return {"success": True, "shareArtifact": share_artifact_public_payload(artifact)}
+
+
+@app.post("/study-planner")
+async def build_study_planner(item: StudyPlannerRequest):
+    return build_study_plan_response(item)
+
+
+@app.get("/faculty/review-inbox")
+async def get_faculty_review_inbox(email: str = Query(...)):
+    normalized_email = normalize_email(email)
+    db = ensure_firestore()
+    session = build_session_payload(normalized_email)
+
+    if session.get("role") != "faculty":
+        raise HTTPException(status_code=403, detail="Faculty access only.")
+
+    university_id = str(session.get("universityId", "")).strip()
+    packs = firestore_guard(
+        lambda: [doc.to_dict() or {} for doc in db.collection("campus_content_packs").stream()]
+    )
+    university_packs = [
+        pack for pack in packs if str(pack.get("universityId", "")).strip() == university_id
+    ]
+    pending_items = [
+        build_review_inbox_item(pack)
+        for pack in university_packs
+        if str(pack.get("reviewStatus", "")).strip() in {"review", "draft"}
+    ]
+    recent_items = [
+        build_review_inbox_item(pack)
+        for pack in university_packs
+        if str(pack.get("reviewStatus", "")).strip() == "approved"
+    ]
+
+    pending_items.sort(
+        key=lambda item: (
+            0 if item.get("reviewStatus") == "review" else 1,
+            -int(item.get("updatedAt", 0) or 0),
+        )
+    )
+    recent_items.sort(key=lambda item: -int(item.get("updatedAt", 0) or 0))
+
+    return {
+        "success": True,
+        "pendingItems": pending_items[:10],
+        "recentApproved": recent_items[:5],
+    }
+
+
+@app.post("/faculty/review-action")
+async def apply_faculty_review_action(item: ReviewActionRequest):
+    normalized_email = normalize_email(item.facultyEmail)
+    db = ensure_firestore()
+    session = build_session_payload(normalized_email)
+
+    if session.get("role") != "faculty":
+        raise HTTPException(status_code=403, detail="Faculty access only.")
+
+    pack_ref = db.collection("campus_content_packs").document(item.contentPackId.strip())
+    pack_doc = firestore_guard(lambda: pack_ref.get())
+    if not pack_doc.exists:
+        raise HTTPException(status_code=404, detail="Content pack not found.")
+
+    pack = pack_doc.to_dict() or {}
+    if str(pack.get("universityId", "")).strip() != str(session.get("universityId", "")).strip():
+        raise HTTPException(status_code=403, detail="You can only review content for your own campus.")
+
+    action_to_status = {
+        "approve": "approved",
+        "request_changes": "review",
+        "save_draft": "draft",
+    }
+    next_status = action_to_status[item.action]
+    update_payload = {
+        "reviewStatus": next_status,
+        "reviewNotes": item.reviewNotes.strip(),
+        "updatedAt": now_ms(),
+        "reviewedBy": normalized_email if next_status == "approved" else "",
+        "reviewedAt": now_ms() if next_status == "approved" else 0,
+    }
+    firestore_guard(lambda: pack_ref.set(update_payload, merge=True))
+    updated_pack = firestore_guard(lambda: pack_ref.get().to_dict() or {})
+    return {
+        "success": True,
+        "contentPack": build_review_inbox_item(updated_pack),
+    }
+
+
+@app.post("/admin/syllabus-import")
+async def import_syllabus_payload(item: SyllabusImportRequest):
+    normalized_email = normalize_email(item.facultyEmail)
+    db = ensure_firestore()
+    session = build_session_payload(normalized_email)
+
+    if session.get("role") != "faculty":
+        raise HTTPException(status_code=403, detail="Faculty access only.")
+
+    selection = build_request_context(
+        email=normalized_email,
+        university_id=item.universityId or str(session.get("universityId", "")),
+        university_slug=item.universitySlug or str(session.get("universitySlug", "")),
+        department_id=item.departmentId or str(session.get("departmentId", "")),
+        program_id=item.programId,
+        term_id=item.termId,
+        role="faculty",
+    )
+
+    raw_text = extract_text_from_import_payload(
+        source_text=item.sourceText,
+        file_name=item.fileName,
+        file_content_base64=item.fileContentBase64,
+    )
+    if not raw_text:
+        raise HTTPException(status_code=400, detail="Please upload a syllabus file or paste syllabus text.")
+
+    subjects = parse_syllabus_text_to_subjects(raw_text, selection.get("programName", ""))
+    if not subjects:
+        raise HTTPException(status_code=400, detail="Could not extract subjects or topics from the syllabus.")
+
+    return {
+        "success": True,
+        "subjects": subjects,
+        "suggestedPackName": f"{selection.get('programName', 'Campus')} imported syllabus pack",
+        "previewText": raw_text[:1200],
+        "detectedCounts": {
+            "subjects": len(subjects),
+            "topics": topic_count_from_subjects(subjects),
+        },
+    }
+
+
+@app.get("/content-pack")
+async def get_content_pack(
+    universityId: str = Query(""),
+    universitySlug: str = Query(""),
+    departmentId: str = Query(""),
+    programId: str = Query(...),
+    termId: str = Query(...),
+    subjectId: str = Query(""),
+    includeUnpublished: bool = Query(False),
+    email: str = Query(""),
+):
+    db = ensure_firestore()
+    selection = resolve_campus_selection(
+        university_id=universityId,
+        university_slug=universitySlug,
+        department_id=departmentId,
+        program_id=programId,
+        term_id=termId,
+    )
+    pack = firestore_guard(lambda: get_or_seed_content_pack(db, selection))
+    if not pack:
+        raise HTTPException(status_code=404, detail="No content pack found for this campus selection.")
+
+    if pack.get("reviewStatus") != "approved" and not includeUnpublished:
+        starter_pack = build_starter_content_pack(
+            selection.get("universityId", ""),
+            selection.get("universitySlug", ""),
+            selection.get("departmentId", ""),
+            selection.get("programId", ""),
+            selection.get("termId", ""),
+        )
+        if starter_pack:
+            pack = starter_pack
+
+    if includeUnpublished:
+        normalized_email = normalize_email(email)
+        if not normalized_email:
+            raise HTTPException(status_code=400, detail="Faculty email is required for unpublished preview.")
+        preview_session = build_session_payload(normalized_email)
+        if (
+            preview_session.get("role") != "faculty"
+            or preview_session.get("universityId") != selection.get("universityId")
+        ):
+            raise HTTPException(status_code=403, detail="Faculty preview access only.")
+
+    if subjectId:
+        subject = next(
+            (
+                item
+                for item in pack.get("subjects", [])
+                if str(item.get("id", "")).strip().lower() == subjectId.strip().lower()
+            ),
+            None,
+        )
+        if not subject:
+            raise HTTPException(status_code=404, detail="Subject not found in this content pack.")
+        return {"success": True, "contentPack": {**pack, "subjects": [subject]}}
+
+    return {"success": True, "contentPack": pack}
+
+
+@app.put("/admin/content-pack")
+async def upsert_content_pack(item: ContentPackUpsertRequest):
+    normalized_email = normalize_email(item.facultyEmail)
+    db = ensure_firestore()
+    session = build_session_payload(normalized_email)
+
+    if session.get("role") != "faculty":
+        raise HTTPException(status_code=403, detail="Faculty access only.")
+
+    selection = build_request_context(
+        email=normalized_email,
+        university_id=item.universityId or str(session.get("universityId", "")),
+        university_slug=item.universitySlug or str(session.get("universitySlug", "")),
+        department_id=item.departmentId or str(session.get("departmentId", "")),
+        program_id=item.programId,
+        term_id=item.termId,
+        role="faculty",
+    )
+    subjects = sanitize_content_pack_subjects(item.subjects)
+    if not subjects:
+        raise HTTPException(status_code=400, detail="Please provide at least one valid subject.")
+
+    payload = {
+        "id": content_pack_doc_id(
+            selection.get("universityId", ""),
+            selection.get("programId", ""),
+            selection.get("termId", ""),
+        ),
+        "name": item.packName.strip()
+        or f"{selection.get('departmentName', '')} starter pack",
+        "universityId": selection.get("universityId", ""),
+        "universitySlug": selection.get("universitySlug", ""),
+        "universityName": selection.get("universityName", ""),
+        "departmentId": selection.get("departmentId", ""),
+        "departmentName": selection.get("departmentName", ""),
+        "programId": selection.get("programId", ""),
+        "programName": selection.get("programName", ""),
+        "termId": selection.get("termId", ""),
+        "termName": selection.get("termName", ""),
+        "reviewStatus": item.reviewStatus,
+        "reviewNotes": item.reviewNotes.strip(),
+        "generatedByAI": bool(item.generatedByAI),
+        "subjects": subjects,
+        "source": "manual-upload",
+        "ingestedBy": normalized_email,
+        "reviewedBy": normalized_email if item.reviewStatus == "approved" else "",
+        "reviewedAt": now_ms() if item.reviewStatus == "approved" else 0,
+        "updatedAt": now_ms(),
+    }
+
+    firestore_guard(
+        lambda: db.collection("campus_content_packs")
+        .document(payload["id"])
+        .set(payload, merge=True)
+    )
+
+    return {"success": True, "contentPack": payload}
 
 
 @app.post("/process-data")

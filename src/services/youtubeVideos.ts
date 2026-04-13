@@ -89,12 +89,14 @@ async function searchYoutubeVideo(query: string): Promise<string | null> {
 
 export async function resolveTopicVideo(input: {
   title: string;
+  universityId?: string;
   subjectTitle?: string;
   unitTitle?: string;
 }): Promise<string | null> {
   let override: Awaited<ReturnType<typeof fetchTopicVideoOverride>> = null;
   try {
     override = await fetchTopicVideoOverride({
+      universityId: input.universityId,
       subjectTitle: input.subjectTitle,
       unitTitle: input.unitTitle,
       topicTitle: input.title,

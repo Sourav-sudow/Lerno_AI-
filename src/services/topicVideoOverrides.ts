@@ -1,6 +1,7 @@
 import { API_BASE_URL } from "./apiBaseUrl";
 
 export type TopicVideoOverride = {
+  universityId?: string;
   subjectTitle: string;
   unitTitle: string;
   topicTitle: string;
@@ -40,6 +41,7 @@ async function parseResponse<T>(response: Response): Promise<T> {
 }
 
 export async function fetchTopicVideoOverride(input: {
+  universityId?: string;
   subjectTitle?: string;
   unitTitle?: string;
   topicTitle: string;
@@ -49,6 +51,7 @@ export async function fetchTopicVideoOverride(input: {
   }
 
   const params = new URLSearchParams({
+    universityId: input.universityId || "",
     subjectTitle: input.subjectTitle,
     unitTitle: input.unitTitle,
     topicTitle: input.topicTitle,
@@ -68,6 +71,7 @@ export async function fetchTopicVideoOverride(input: {
 
 export async function saveTopicVideoOverride(input: {
   facultyEmail: string;
+  universityId?: string;
   subjectTitle: string;
   unitTitle: string;
   topicTitle: string;

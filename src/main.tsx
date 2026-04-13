@@ -14,6 +14,7 @@ const LearningPage = lazy(() => import("./components/LearningPage.tsx"));
 const ProfilePage = lazy(() => import("./components/ProfilePage.tsx"));
 const OnboardingPage = lazy(() => import("./components/OnboardingPage.tsx"));
 const FacultyDashboardPage = lazy(() => import("./components/FacultyDashboardPage.tsx"));
+const SharedArtifactPage = lazy(() => import("./components/SharedArtifactPage.tsx"));
 
 function LearningFallback() {
   return (
@@ -118,6 +119,7 @@ createRoot(document.getElementById("root")!).render(
             <Route path="/" element={<HomeRoute />} />
             <Route path="/login" element={<LoginPage mode="login" />} />
             <Route path="/signup" element={<LoginPage mode="signup" />} />
+            <Route path="/share/:shareId" element={<SharedArtifactPage />} />
             <Route path="/onboarding" element={<OnboardingRoute />} />
             <Route
               path="/learning"

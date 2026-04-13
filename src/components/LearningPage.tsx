@@ -9,20 +9,27 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { generateExamQuestions, GeneratedExamQuestions } from "../services/openRouterExamQuestions";
 import { resolveTopicVideo } from "../services/youtubeVideos";
-import { coursesData } from "../data/coursesData";
 import {
   clearCachedSession,
   fetchSession,
+  getCampusSelectionFromSession,
   getCachedSession,
   updateLearningState,
   updatePreferences,
   type SavedTopic as SessionSavedTopic,
 } from "../services/appSession";
+import { fetchCampusContentPack, getCoursesDataForSelection } from "../services/campusContent";
+import { trackEvent } from "../services/activityTracker";
+import { buildCoursesDataFromContentPack } from "../services/campusData";
+import { fetchCampusGrowth, type CampusGrowthData } from "../services/campusGrowth";
+import { createShareArtifact } from "../services/shareArtifacts";
+import { buildStudyPlan, type StudyPlan } from "../services/studyPlanner";
 
 const RECENT_TOPICS_STORAGE_KEY = "lernoRecentTopics";
 const BOOKMARKED_TOPICS_STORAGE_KEY = "lernoBookmarkedTopics";
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "lernoSidebarCollapsed";
 const THEME_STORAGE_KEY = "lernoTheme";
+const COMPLETED_PRACTICE_STORAGE_KEY = "lernoCompletedPracticeTopics";
 const MAX_RECENT_TOPICS = 8;
 
 type TopicItem = {
@@ -143,13 +150,25 @@ function buildQuickNotes(input: {
   ];
 }
 
+function getDefaultExamDate() {
+  const examDate = new Date();
+  examDate.setDate(examDate.getDate() + 7);
+  return examDate.toISOString().slice(0, 10);
+}
+
 const LearningPage = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const cachedSession = useMemo(() => getCachedSession(), []);
+  const campusSelection = useMemo(
+    () => getCampusSelectionFromSession(cachedSession),
+    [cachedSession]
+  );
   const sessionEmail = cachedSession?.email || localStorage.getItem("userEmail") || "";
   const syncingFromServerRef = useRef(false);
   const hydratedSessionRef = useRef(false);
+  const viewedLessonKeysRef = useRef<Set<string>>(new Set());
+  const sharedTopicHandledRef = useRef("");
 
   const profileRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLDivElement | null>(null);
@@ -197,10 +216,23 @@ const LearningPage = () => {
   });
   const [searchDropdownOpen, setSearchDropdownOpen] = useState(false);
   const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0);
+  const [contentPack, setContentPack] = useState(() =>
+    getCoursesDataForSelection(campusSelection)
+  );
+  const [growth, setGrowth] = useState<CampusGrowthData | null>(null);
+  const [completedPracticeTopics, setCompletedPracticeTopics] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(COMPLETED_PRACTICE_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
 
   const allTopics: TopicItem[] = useMemo(() => {
     const list: TopicItem[] = [];
-    Object.values(coursesData).forEach((course) => {
+    Object.values(contentPack).forEach((course) => {
       Object.values(course.years).forEach((year) => {
         Object.entries(year.subjects).forEach(([subjectKey, rawSubject]) => {
           const subject: any = rawSubject;
@@ -236,10 +268,10 @@ const LearningPage = () => {
       });
     });
     return list;
-  }, []);
+  }, [contentPack]);
   const allUnits = useMemo(() => {
     const list: UnitSearchItem[] = [];
-    Object.values(coursesData).forEach((course) => {
+    Object.values(contentPack).forEach((course) => {
       Object.values(course.years).forEach((year) => {
         Object.entries(year.subjects).forEach(([subjectKey, rawSubject]) => {
           const subject: any = rawSubject;
@@ -256,7 +288,7 @@ const LearningPage = () => {
       });
     });
     return list;
-  }, []);
+  }, [contentPack]);
   const FetchData = location.state?.responseData || [
     {
       title: "Introduction to Vectors",
@@ -283,6 +315,12 @@ const LearningPage = () => {
   const [examQuestions, setExamQuestions] = useState<GeneratedExamQuestions | null>(null);
   const [examQuestionsLoading, setExamQuestionsLoading] = useState(false);
   const [examQuestionsError, setExamQuestionsError] = useState<string | null>(null);
+  const [plannerExamDate, setPlannerExamDate] = useState(getDefaultExamDate);
+  const [plannerDailyMinutes, setPlannerDailyMinutes] = useState(60);
+  const [plannerConfidence, setPlannerConfidence] = useState<"low" | "medium" | "high">("medium");
+  const [studyPlan, setStudyPlan] = useState<StudyPlan | null>(null);
+  const [studyPlanLoading, setStudyPlanLoading] = useState(false);
+  const [studyPlanError, setStudyPlanError] = useState<string | null>(null);
 
   const displayTitle = selectedTopicTitle || "";
   const displayNarration = selectedTopicNarration || "";
@@ -301,6 +339,41 @@ const LearningPage = () => {
       }),
     [displayNarration, displayTitle, selectedUnitTitle]
   );
+  const subjectRevisionPack = useMemo(() => {
+    if (!syllabusSubjectTitle) return [];
+    return allTopics
+      .filter((topic) => topic.subjectTitle === syllabusSubjectTitle)
+      .slice(0, 6)
+      .map((topic) => ({
+        title: topic.title,
+        summary:
+          topic.narration ||
+          `Revise ${topic.title.toLowerCase()} and connect it with ${topic.unitTitle || syllabusSubjectTitle}.`,
+      }));
+  }, [allTopics, syllabusSubjectTitle]);
+  const plannerTopicTitles = useMemo(
+    () =>
+      (subjectRevisionPack.length
+        ? subjectRevisionPack.map((topic) => topic.title)
+        : displayTitle
+          ? [displayTitle]
+          : allTopics.slice(0, 6).map((topic) => topic.title)
+      ).filter(Boolean),
+    [allTopics, displayTitle, subjectRevisionPack]
+  );
+  const inviteLink = useMemo(() => {
+    const referral = campusSelection.referralCode || "";
+    if (!referral) return "";
+    const params = new URLSearchParams({
+      ref: referral,
+      university: campusSelection.universityId || "",
+    });
+    return `${window.location.origin}/signup?${params.toString()}`;
+  }, [campusSelection.referralCode, campusSelection.universityId]);
+  const currentTopicPracticeDone = completedPracticeTopics.includes(
+    displayTitle.toLowerCase()
+  );
+  const plannerIsExamWeek = (studyPlan?.daysUntilExam ?? 99) <= 7;
 
   function handleNextSlide() {
     const totalSlides = Math.min(FetchData.length, 5);
@@ -376,6 +449,13 @@ const LearningPage = () => {
     localStorage.setItem(THEME_STORAGE_KEY, theme);
     document.documentElement.classList.toggle("dark", theme === "dark");
   }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem(
+      COMPLETED_PRACTICE_STORAGE_KEY,
+      JSON.stringify(completedPracticeTopics)
+    );
+  }, [completedPracticeTopics]);
 
   useEffect(() => {
     if (!sessionEmail || !hydratedSessionRef.current || syncingFromServerRef.current) {
@@ -456,6 +536,10 @@ const LearningPage = () => {
         syncingFromServerRef.current = true;
         const session = await fetchSession(sessionEmail);
         if (!active) return;
+        const remoteContentPack = await fetchCampusContentPack(
+          getCampusSelectionFromSession(session)
+        );
+        if (!active) return;
 
         if (session.profile) {
           setProfileName(session.profile.fullName || "Sourav Kumar");
@@ -485,6 +569,9 @@ const LearningPage = () => {
               : "No topic video found right now. Try another lesson."
             : "Select a topic to start learning."
         );
+        if (remoteContentPack) {
+          setContentPack(buildCoursesDataFromContentPack(remoteContentPack));
+        }
       } catch (error) {
         console.error("Failed to hydrate session", error);
       } finally {
@@ -494,6 +581,27 @@ const LearningPage = () => {
     };
 
     hydrateSession();
+
+    return () => {
+      active = false;
+    };
+  }, [sessionEmail]);
+
+  useEffect(() => {
+    if (!sessionEmail) return;
+
+    let active = true;
+    fetchCampusGrowth(sessionEmail)
+      .then((data) => {
+        if (active) {
+          setGrowth(data);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setGrowth(null);
+        }
+      });
 
     return () => {
       active = false;
@@ -548,7 +656,34 @@ const LearningPage = () => {
   }, [displayTitle, displayNarration]);
 
   useEffect(() => {
+    setStudyPlan(null);
+    setStudyPlanError(null);
+  }, [displayTitle, syllabusSubjectTitle]);
+
+  useEffect(() => {
     if (!displayTitle) return;
+
+    const lessonKey = [
+      campusSelection.universityId || "",
+      syllabusSubjectTitle || "",
+      selectedUnitTitle || "",
+      displayTitle,
+    ]
+      .join("::")
+      .toLowerCase();
+    if (!viewedLessonKeysRef.current.has(lessonKey)) {
+      viewedLessonKeysRef.current.add(lessonKey);
+      trackEvent({
+        eventType: "first_lesson_viewed",
+        email: sessionEmail,
+        selection: campusSelection,
+        metadata: {
+          topicTitle: displayTitle,
+          subjectTitle: syllabusSubjectTitle,
+          unitTitle: selectedUnitTitle,
+        },
+      });
+    }
 
     const matchedTopic = allTopics.find(
       (topic) => topic.title.toLowerCase() === displayTitle.toLowerCase()
@@ -563,7 +698,7 @@ const LearningPage = () => {
       setSelectedUnitTitle(matchedTopic.unitTitle);
       setSelectedUnitTopicsDisplay(matchedTopic.unitTopics || []);
     }
-  }, [allTopics, displayTitle]);
+  }, [allTopics, campusSelection, displayTitle, selectedUnitTitle, sessionEmail, syllabusSubjectTitle]);
 
   const saveRecentTopic = (entry: SavedTopic) => {
     setRecentTopics((prev) => {
@@ -624,6 +759,7 @@ const LearningPage = () => {
         matchedTopic.videoUrl ||
         (await resolveTopicVideo({
           title: matchedTopic.title,
+          universityId: campusSelection.universityId,
           subjectTitle: matchedTopic.subjectTitle,
           unitTitle: matchedTopic.unitTitle,
         })) ||
@@ -658,6 +794,21 @@ const LearningPage = () => {
     syncBookmarkedTopicMetadata(savedTopic);
     setSearchDropdownOpen(false);
   };
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const sharedTopic = params.get("topic");
+    if (!sharedTopic || !allTopics.length) return;
+
+    const normalized = sharedTopic.trim().toLowerCase();
+    if (sharedTopicHandledRef.current === normalized) return;
+
+    const matched = allTopics.find((topic) => topic.title.toLowerCase() === normalized);
+    if (!matched) return;
+
+    sharedTopicHandledRef.current = normalized;
+    handleTopicSelect(matched);
+  }, [allTopics, location.search]);
 
   const openUnitSuggestion = (unit: UnitSearchItem) => {
     setSyllabusSubjectTitle(unit.subjectTitle);
@@ -804,6 +955,213 @@ const LearningPage = () => {
     });
   };
 
+  const createPublicShareUrl = async (artifact: "topic" | "notes" | "explainer" | "quiz") => {
+    if (!displayTitle) return "";
+    const revisionText = quickNotes.slice(0, 3).join(" | ");
+    const shareTitle =
+      artifact === "topic"
+        ? `Lerno topic: ${displayTitle}`
+        : artifact === "notes"
+          ? `Revision notes: ${displayTitle}`
+          : artifact === "explainer"
+            ? `Topic explainer: ${displayTitle}`
+            : `Quiz card: ${displayTitle}`;
+    const shareText =
+      artifact === "topic"
+        ? `${displayTitle} • ${syllabusSubjectTitle || "Lerno study topic"}`
+        : artifact === "notes"
+          ? revisionText || `Quick revision for ${displayTitle}`
+          : artifact === "explainer"
+            ? displayNarration || `Open this explainer for ${displayTitle} on Lerno.`
+            : `Practice set for ${displayTitle} • 5M: ${examQuestions?.fiveMarkQuestions.length || 0} • 10M: ${examQuestions?.tenMarkQuestions.length || 0}`;
+
+    const created = await createShareArtifact({
+      email: sessionEmail,
+      artifactType: artifact,
+      topicTitle: displayTitle,
+      subjectTitle: syllabusSubjectTitle,
+      unitTitle: selectedUnitTitle,
+      universityId: campusSelection.universityId,
+      universitySlug: campusSelection.universitySlug,
+      departmentId: campusSelection.departmentId,
+      programId: campusSelection.programId,
+      termId: campusSelection.termId,
+      referralCode: campusSelection.referralCode,
+      shareTitle,
+      shareText,
+      payload: {
+        notes: quickNotes,
+        narration: displayNarration,
+        fiveMarkQuestions: examQuestions?.fiveMarkQuestions.map((question) => question.question) || [],
+        tenMarkQuestions: examQuestions?.tenMarkQuestions.map((question) => question.question) || [],
+        summary: revisionText || displayNarration || shareText,
+      },
+    });
+
+    return `${window.location.origin}/share/${created.shareArtifact.id}`;
+  };
+
+  const handleShareTopic = async () => {
+    if (!displayTitle) return;
+
+    try {
+      const shareUrl = await createPublicShareUrl("topic");
+      if (!shareUrl) return;
+      const payload = {
+        title: `Lerno topic: ${displayTitle}`,
+        text: `${displayTitle} • ${syllabusSubjectTitle || "Lerno study topic"}`,
+        url: shareUrl,
+      };
+
+      if (navigator.share) {
+        await navigator.share(payload);
+      } else if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(shareUrl);
+      }
+      trackEvent({
+        eventType: "share_clicked",
+        email: sessionEmail,
+        selection: campusSelection,
+        metadata: {
+          artifact: "topic",
+          topicTitle: displayTitle,
+          subjectTitle: syllabusSubjectTitle,
+        },
+      });
+    } catch {
+      // Ignore cancelled shares.
+    }
+  };
+
+  const shareArtifact = async (artifact: "invite" | "notes" | "explainer" | "quiz") => {
+    const shareUrl =
+      artifact === "invite" ? inviteLink : await createPublicShareUrl(artifact);
+    if (!shareUrl) return;
+
+    const revisionText = quickNotes.slice(0, 3).join(" | ");
+    const payload =
+      artifact === "invite"
+        ? {
+            title: "Join my Lerno campus loop",
+            text: `Use my referral code ${campusSelection.referralCode || ""} to join ${cachedSession?.profile?.universityName || "my campus"} on Lerno.`,
+            url: shareUrl,
+          }
+        : artifact === "notes"
+          ? {
+              title: `Revision notes: ${displayTitle}`,
+              text: revisionText || `Quick revision for ${displayTitle}`,
+              url: shareUrl,
+            }
+          : artifact === "explainer"
+            ? {
+                title: `Topic explainer: ${displayTitle}`,
+                text:
+                  displayNarration || `Open this explainer for ${displayTitle} on Lerno.`,
+                url: shareUrl,
+              }
+            : {
+                title: `Quiz card: ${displayTitle}`,
+                text: `Practice set for ${displayTitle} • 5M: ${examQuestions?.fiveMarkQuestions.length || 0} • 10M: ${examQuestions?.tenMarkQuestions.length || 0}`,
+                url: shareUrl,
+              };
+
+    try {
+      if (navigator.share) {
+        await navigator.share(payload);
+      } else if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(
+          `${payload.title}\n${payload.text}\n${payload.url}`
+        );
+      }
+
+      trackEvent({
+        eventType: "share_clicked",
+        email: sessionEmail,
+        selection: campusSelection,
+        metadata: {
+          artifact,
+          topicTitle: displayTitle,
+          subjectTitle: syllabusSubjectTitle,
+        },
+      });
+    } catch {
+      // Ignore cancelled shares.
+    }
+  };
+
+  const handleMarkPracticeComplete = async () => {
+    if (!displayTitle) return;
+
+    const normalized = displayTitle.toLowerCase();
+    setCompletedPracticeTopics((prev) =>
+      prev.includes(normalized) ? prev : [...prev, normalized]
+    );
+    await trackEvent({
+      eventType: "quiz_completed",
+      email: sessionEmail,
+      selection: campusSelection,
+      metadata: {
+        topicTitle: displayTitle,
+        subjectTitle: syllabusSubjectTitle,
+        source: "practice-set",
+      },
+    });
+    fetchCampusGrowth(sessionEmail)
+      .then((data) => setGrowth(data))
+      .catch(() => undefined);
+  };
+
+  const handleCopyInviteLink = async () => {
+    if (!inviteLink) return;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(inviteLink);
+      }
+      trackEvent({
+        eventType: "share_clicked",
+        email: sessionEmail,
+        selection: campusSelection,
+        metadata: {
+          artifact: "invite",
+          referralCode: campusSelection.referralCode || "",
+        },
+      });
+    } catch {
+      // Ignore
+    }
+  };
+
+  const handleGenerateStudyPlan = async () => {
+    if (!plannerExamDate) {
+      setStudyPlanError("Please choose your exam date.");
+      return;
+    }
+
+    setStudyPlanLoading(true);
+    setStudyPlanError(null);
+    try {
+      const result = await buildStudyPlan({
+        email: sessionEmail,
+        universityId: campusSelection.universityId,
+        universitySlug: campusSelection.universitySlug,
+        departmentId: campusSelection.departmentId,
+        programId: campusSelection.programId,
+        termId: campusSelection.termId,
+        subjectTitle: syllabusSubjectTitle || displayTitle || "Current subject",
+        topicTitles: plannerTopicTitles,
+        completedPracticeTopics,
+        examDate: plannerExamDate,
+        dailyMinutes: plannerDailyMinutes,
+        confidenceLevel: plannerConfidence,
+      });
+      setStudyPlan(result.plan);
+    } catch (err) {
+      setStudyPlanError((err as Error).message || "Failed to build study plan.");
+    } finally {
+      setStudyPlanLoading(false);
+    }
+  };
+
   const lastSelectionHint = selectedTopicTitle || (allTopics[0]?.title ?? "");
   const isDarkTheme = theme === "dark";
   const textPrimary = isDarkTheme ? "text-white" : "text-slate-900";
@@ -909,6 +1267,135 @@ const LearningPage = () => {
               </div>
             ) : (
               <div className="flex-1 space-y-6 overflow-y-auto px-4 py-5 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
+                <section>
+                  <div className="mb-3 flex items-center justify-between">
+                    <p className={`text-xs uppercase tracking-[0.28em] ${textMuted}`}>
+                      Continue
+                    </p>
+                    <span className={`text-xs ${textMuted}`}>
+                      {selectedTopicTitle ? "Ready" : "Idle"}
+                    </span>
+                  </div>
+                  {selectedTopicTitle ? (
+                    <button
+                      type="button"
+                      onClick={() => handleTopicSelect({ title: selectedTopicTitle })}
+                      className={`w-full rounded-2xl border px-4 py-4 text-left transition ${chipCard}`}
+                    >
+                      <p className={`text-sm font-semibold ${textPrimary}`}>{selectedTopicTitle}</p>
+                      <p className={`mt-1 text-xs ${textMuted}`}>
+                        {selectedUnitTitle || syllabusSubjectTitle || "Continue where you left off"}
+                      </p>
+                    </button>
+                  ) : (
+                    <div className={`rounded-2xl border border-dashed px-4 py-5 text-sm ${subtleBorder} ${isDarkTheme ? "bg-white/[0.02] text-white/45" : "bg-slate-50 text-slate-500"}`}>
+                      Your last lesson will appear here once you start studying.
+                    </div>
+                  )}
+                </section>
+
+                <section>
+                  <div className="mb-3 flex items-center justify-between">
+                    <p className={`text-xs uppercase tracking-[0.28em] ${textMuted}`}>
+                      Campus Loop
+                    </p>
+                    <span className={`text-xs ${textMuted}`}>
+                      {growth?.ambassadorMetrics.weeklyActivationProgress.progressPercent ?? 0}%
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      ["Streak", growth?.ambassadorMetrics.streakDays ?? 0],
+                      ["Quizzes", growth?.ambassadorMetrics.quizzesCompleted ?? 0],
+                      ["Invites", growth?.ambassadorMetrics.inviteCount ?? 0],
+                    ].map(([label, value]) => (
+                      <div
+                        key={label}
+                        className={`rounded-2xl border px-3 py-3 text-center ${chipCard}`}
+                      >
+                        <p className={`text-[11px] uppercase tracking-[0.2em] ${textMuted}`}>{label}</p>
+                        <p className={`mt-2 text-lg font-semibold ${textPrimary}`}>{value}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className={`mt-3 rounded-2xl border px-4 py-4 ${chipCard}`}>
+                    <p className={`text-[11px] uppercase tracking-[0.22em] ${textMuted}`}>
+                      Referral Code
+                    </p>
+                    <p className={`mt-2 text-sm font-semibold ${textPrimary}`}>
+                      {campusSelection.referralCode || "Unlock after onboarding"}
+                    </p>
+                    <div className="mt-3 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={handleCopyInviteLink}
+                        disabled={!inviteLink}
+                        className={`flex-1 rounded-xl px-3 py-2 text-xs font-semibold ${
+                          isDarkTheme
+                            ? "bg-cyan-500/15 text-cyan-200 disabled:bg-white/5 disabled:text-white/35"
+                            : "bg-cyan-100 text-cyan-700 disabled:bg-slate-100 disabled:text-slate-400"
+                        }`}
+                      >
+                        Copy Invite
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => shareArtifact("invite")}
+                        disabled={!inviteLink}
+                        className={`flex-1 rounded-xl px-3 py-2 text-xs font-semibold ${
+                          isDarkTheme
+                            ? "bg-violet-500/15 text-violet-200 disabled:bg-white/5 disabled:text-white/35"
+                            : "bg-violet-100 text-violet-700 disabled:bg-slate-100 disabled:text-slate-400"
+                        }`}
+                      >
+                        Share Invite
+                      </button>
+                    </div>
+                  </div>
+                </section>
+
+                <section>
+                  <div className="mb-3 flex items-center justify-between">
+                    <p className={`text-xs uppercase tracking-[0.28em] ${textMuted}`}>
+                      Campus Leaderboards
+                    </p>
+                    <span className={`text-xs ${textMuted}`}>
+                      Top 3
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    {[
+                      { label: "Referrals", entry: growth?.leaderboards.referrals?.[0] },
+                      { label: "Streaks", entry: growth?.leaderboards.streaks?.[0] },
+                      { label: "Quizzes", entry: growth?.leaderboards.quizzes?.[0] },
+                    ].map(({ label, entry }) =>
+                      entry ? (
+                        <div
+                          key={`${label}-${entry.rank}-${entry.email}`}
+                          className={`rounded-2xl border px-4 py-3 ${chipCard}`}
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className={`truncate text-sm font-medium ${textPrimary}`}>
+                                {entry.rank}. {entry.fullName}
+                              </p>
+                              <p className={`mt-1 truncate text-xs ${textMuted}`}>{label} leaderboard</p>
+                            </div>
+                            <span className={`text-sm font-semibold ${textPrimary}`}>{entry.value}</span>
+                          </div>
+                        </div>
+                      ) : null
+                    )}
+                    {!(growth?.leaderboards.referrals || []).length &&
+                    !(growth?.leaderboards.streaks || []).length &&
+                    !(growth?.leaderboards.quizzes || []).length ? (
+                      <div className={`rounded-2xl border border-dashed px-4 py-5 text-sm ${subtleBorder} ${isDarkTheme ? "bg-white/[0.02] text-white/45" : "bg-slate-50 text-slate-500"}`}>
+                        Leaderboard will light up once referrals start converting.
+                      </div>
+                    ) : null}
+                  </div>
+                </section>
+
                 <section>
                   <div className="mb-3 flex items-center justify-between">
                     <p className={`text-xs uppercase tracking-[0.28em] ${textMuted}`}>
@@ -1353,7 +1840,51 @@ const LearningPage = () => {
                 />
               </svg>
             </button>
+            <button
+              type="button"
+              onClick={handleShareTopic}
+              disabled={!displayTitle}
+              className={`flex h-12 w-12 items-center justify-center rounded-full border transition ${
+                isDarkTheme
+                  ? "border-white/10 bg-white/5 text-white/55 hover:bg-white/10 hover:text-white"
+                  : "border-slate-300/80 bg-white text-slate-500 hover:bg-slate-50 hover:text-slate-900"
+              } disabled:cursor-not-allowed disabled:opacity-40`}
+              aria-label="Share current topic"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.6}
+                className="h-5 w-5"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm9 6a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm0-12a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm-6.4 4.8 3.8 2.4m-3.8-2.4 3.8-2.4" />
+              </svg>
+            </button>
           </div>
+        </div>
+
+        <div className="mt-4 flex w-full max-w-4xl flex-wrap justify-center gap-3">
+          {[
+            { label: "Revision Notes", action: () => shareArtifact("notes") },
+            { label: "Topic Explainer", action: () => shareArtifact("explainer") },
+            { label: "Quiz Card", action: () => shareArtifact("quiz") },
+          ].map(({ label, action }) => (
+            <button
+              key={label}
+              type="button"
+              onClick={action}
+              disabled={!displayTitle}
+              className={`rounded-full border px-4 py-2 text-sm font-medium transition ${
+                isDarkTheme
+                  ? "border-white/10 bg-white/5 text-white/80 hover:bg-white/10"
+                  : "border-slate-300/80 bg-white text-slate-700 hover:bg-slate-50"
+              } disabled:cursor-not-allowed disabled:opacity-40`}
+            >
+              {label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -1478,6 +2009,35 @@ const LearningPage = () => {
                 <p className={textSecondary}>Select a topic to view important exam questions.</p>
               ) : examQuestions ? (
                 <div className="space-y-4 flex-1 overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={handleMarkPracticeComplete}
+                      disabled={currentTopicPracticeDone}
+                      className={`rounded-xl px-3 py-2 text-xs font-semibold ${
+                        currentTopicPracticeDone
+                          ? isDarkTheme
+                            ? "bg-emerald-500/10 text-emerald-200"
+                            : "bg-emerald-100 text-emerald-700"
+                          : isDarkTheme
+                            ? "bg-blue-500/15 text-blue-200 hover:bg-blue-500/25"
+                            : "bg-blue-100 text-blue-700 hover:bg-blue-200"
+                      }`}
+                    >
+                      {currentTopicPracticeDone ? "Practice Completed" : "Mark Practice Set Done"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => shareArtifact("quiz")}
+                      className={`rounded-xl px-3 py-2 text-xs font-semibold ${
+                        isDarkTheme
+                          ? "bg-violet-500/15 text-violet-200 hover:bg-violet-500/25"
+                          : "bg-violet-100 text-violet-700 hover:bg-violet-200"
+                      }`}
+                    >
+                      Share Quiz Card
+                    </button>
+                  </div>
                   {/* 5 Mark Questions */}
                   <div>
                     <h4 className="text-amber-400 font-semibold text-sm mb-2">5 Marks Questions</h4>
@@ -1531,22 +2091,40 @@ const LearningPage = () => {
             <div className="absolute inset-0 bg-gradient-to-br from-amber-500/20 via-orange-500/20 to-rose-500/20 opacity-0 group-hover:opacity-100 transition-opacity duration-500"></div>
             <div className="absolute inset-0 bg-grid-white/[0.02] bg-[size:20px_20px]"></div>
             <div className="h-full w-full flex flex-col gap-4 relative z-10">
-              {selectedUnitTopicsDisplay.length > 0 ? (
+              {subjectRevisionPack.length > 0 ? (
                 <div className="space-y-3">
-                  <p className={`font-semibold text-lg ${textPrimary}`}>Unit Topics</p>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className={`font-semibold text-lg ${textPrimary}`}>Revision Pack</p>
+                      {syllabusSubjectTitle ? (
+                        <p className={`text-sm ${textSecondary}`}>{syllabusSubjectTitle}</p>
+                      ) : null}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => shareArtifact("notes")}
+                      className={`rounded-xl px-3 py-2 text-xs font-semibold ${
+                        isDarkTheme
+                          ? "bg-amber-500/15 text-amber-200 hover:bg-amber-500/25"
+                          : "bg-amber-100 text-amber-700 hover:bg-amber-200"
+                      }`}
+                    >
+                      Share Notes
+                    </button>
+                  </div>
                   {selectedUnitTitle ? (
                     <p className={`text-sm ${textSecondary}`}>{selectedUnitTitle}</p>
                   ) : null}
                   <div className="flex flex-col gap-2">
-                    {selectedUnitTopicsDisplay.map((topic) => (
+                    {subjectRevisionPack.map((topic) => (
                       <button
-                        key={topic}
+                        key={topic.title}
                         onClick={() => {
-                          const found = allTopics.find((t) => t.title.toLowerCase() === topic.toLowerCase());
+                          const found = allTopics.find((t) => t.title.toLowerCase() === topic.title.toLowerCase());
                           if (found) {
                             handleTopicSelect(found);
                           } else {
-                            handleTopicSelect({ title: topic });
+                            handleTopicSelect({ title: topic.title });
                           }
                         }}
                         className={`w-full text-left px-4 py-2.5 rounded-lg border transition ${
@@ -1555,7 +2133,8 @@ const LearningPage = () => {
                             : "bg-slate-50 border-slate-300/70 text-slate-700 hover:bg-slate-100"
                         }`}
                       >
-                        {topic}
+                        <p className="font-medium">{topic.title}</p>
+                        <p className={`mt-1 text-xs ${textMuted}`}>{topic.summary}</p>
                       </button>
                     ))}
                   </div>
@@ -1602,6 +2181,280 @@ const LearningPage = () => {
               )}
             </div>
             <div className="absolute -inset-px bg-gradient-to-r from-amber-500/30 via-transparent to-rose-500/30 rounded-xl opacity-0 group-hover:opacity-100 blur-xl transition-opacity duration-500"></div>
+          </div>
+
+          <div className={`relative overflow-hidden rounded-xl border p-6 md:col-span-3 backdrop-blur-sm transition-all duration-300 ${glassCard}`}>
+            <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/15 via-sky-500/10 to-fuchsia-500/10 opacity-80"></div>
+            <div className="absolute inset-0 bg-grid-white/[0.02] bg-[size:20px_20px]"></div>
+            <div className="relative z-10">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <p className={`text-xs uppercase tracking-[0.28em] ${textMuted}`}>
+                    Exam Week Mode
+                  </p>
+                  <h3 className={`mt-2 text-2xl font-semibold ${textPrimary}`}>
+                    Personalized Study Planner
+                  </h3>
+                  <p className={`mt-3 max-w-2xl text-sm ${textSecondary}`}>
+                    Build a day-wise revision plan for the current subject, tighten the last 7 days before the exam, and keep your highest-yield topics visible.
+                  </p>
+                </div>
+                {studyPlan ? (
+                  <div className={`rounded-3xl border px-4 py-4 ${
+                    plannerIsExamWeek
+                      ? isDarkTheme
+                        ? "border-rose-400/20 bg-rose-500/10 text-rose-100"
+                        : "border-rose-200 bg-rose-50 text-rose-700"
+                      : isDarkTheme
+                        ? "border-cyan-400/20 bg-cyan-500/10 text-cyan-100"
+                        : "border-cyan-200 bg-cyan-50 text-cyan-700"
+                  }`}>
+                    <p className="text-xs uppercase tracking-[0.22em] opacity-75">
+                      {plannerIsExamWeek ? "Live Exam Week" : "Study Mode"}
+                    </p>
+                    <p className="mt-2 text-lg font-semibold">
+                      {studyPlan.daysUntilExam} day{studyPlan.daysUntilExam === 1 ? "" : "s"} left
+                    </p>
+                    <p className="mt-1 text-sm opacity-80">{studyPlan.summary}</p>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="mt-6 grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
+                <div className={`rounded-3xl border p-5 ${
+                  isDarkTheme
+                    ? "border-white/10 bg-white/[0.03]"
+                    : "border-slate-300/70 bg-white/92"
+                }`}>
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <label className="space-y-2 text-sm">
+                      <span className={textMuted}>Exam date</span>
+                      <input
+                        type="date"
+                        value={plannerExamDate}
+                        onChange={(e) => setPlannerExamDate(e.target.value)}
+                        className={`w-full rounded-2xl border px-4 py-3 outline-none ${
+                          isDarkTheme
+                            ? "border-white/10 bg-white/[0.04] text-white"
+                            : "border-slate-300 bg-white text-slate-900"
+                        }`}
+                      />
+                    </label>
+                    <label className="space-y-2 text-sm">
+                      <span className={textMuted}>Daily minutes</span>
+                      <input
+                        type="number"
+                        min={20}
+                        max={240}
+                        step={10}
+                        value={plannerDailyMinutes}
+                        onChange={(e) => setPlannerDailyMinutes(Number(e.target.value) || 60)}
+                        className={`w-full rounded-2xl border px-4 py-3 outline-none ${
+                          isDarkTheme
+                            ? "border-white/10 bg-white/[0.04] text-white"
+                            : "border-slate-300 bg-white text-slate-900"
+                        }`}
+                      />
+                    </label>
+                    <label className="space-y-2 text-sm">
+                      <span className={textMuted}>Confidence</span>
+                      <select
+                        value={plannerConfidence}
+                        onChange={(e) => setPlannerConfidence(e.target.value as "low" | "medium" | "high")}
+                        className={`w-full rounded-2xl border px-4 py-3 outline-none ${
+                          isDarkTheme
+                            ? "border-white/10 bg-white/[0.04] text-white"
+                            : "border-slate-300 bg-white text-slate-900"
+                        }`}
+                      >
+                        <option value="low">Need help</option>
+                        <option value="medium">Getting there</option>
+                        <option value="high">Almost ready</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      onClick={handleGenerateStudyPlan}
+                      className={`rounded-full px-5 py-3 text-sm font-semibold text-white ${
+                        plannerIsExamWeek
+                          ? "bg-gradient-to-r from-rose-500 to-orange-500"
+                          : "bg-gradient-to-r from-cyan-500 to-fuchsia-500"
+                      }`}
+                    >
+                      {studyPlanLoading ? "Building plan..." : "Generate Plan"}
+                    </button>
+                    <div className={`rounded-full border px-4 py-3 text-sm ${
+                      isDarkTheme
+                        ? "border-white/10 bg-white/[0.03] text-white/65"
+                        : "border-slate-300 bg-slate-50 text-slate-600"
+                    }`}>
+                      {syllabusSubjectTitle || displayTitle || "Choose a lesson to make the plan more specific"}
+                    </div>
+                  </div>
+
+                  {studyPlanError ? (
+                    <div className={`mt-4 rounded-2xl border px-4 py-3 text-sm ${
+                      isDarkTheme
+                        ? "border-rose-500/20 bg-rose-500/10 text-rose-200"
+                        : "border-rose-200 bg-rose-50 text-rose-700"
+                    }`}>
+                      {studyPlanError}
+                    </div>
+                  ) : null}
+
+                  <div className="mt-5 grid gap-3 md:grid-cols-2">
+                    <div className={`rounded-2xl border px-4 py-4 ${
+                      isDarkTheme
+                        ? "border-white/10 bg-white/[0.02]"
+                        : "border-slate-300/70 bg-slate-50/90"
+                    }`}>
+                      <p className={`text-xs uppercase tracking-[0.22em] ${textMuted}`}>Priority Topics</p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {(studyPlan?.priorityTopics.length ? studyPlan.priorityTopics : plannerTopicTitles.slice(0, 6)).map((topic) => (
+                          <button
+                            key={topic}
+                            type="button"
+                            onClick={() => handleTopicSelect({ title: topic })}
+                            className={`rounded-full border px-3 py-1.5 text-xs ${
+                              isDarkTheme
+                                ? "border-white/10 bg-white/[0.04] text-white/75"
+                                : "border-slate-300 bg-white text-slate-700"
+                            }`}
+                          >
+                            {topic}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className={`rounded-2xl border px-4 py-4 ${
+                      isDarkTheme
+                        ? "border-white/10 bg-white/[0.02]"
+                        : "border-slate-300/70 bg-slate-50/90"
+                    }`}>
+                      <p className={`text-xs uppercase tracking-[0.22em] ${textMuted}`}>Quick Wins</p>
+                      <div className="mt-3 space-y-2">
+                        {(studyPlan?.quickWins.length ? studyPlan.quickWins : [
+                          "Choose your exam date and generate a day-wise revision plan.",
+                          "Keep practice sets marked complete so the planner prioritizes weak areas.",
+                          "Use the shared revision packs to bring classmates into the same exam sprint.",
+                        ]).map((item) => (
+                          <div key={item} className={`rounded-2xl border px-3 py-3 text-sm ${
+                            isDarkTheme
+                              ? "border-white/10 bg-white/[0.03] text-white/75"
+                              : "border-slate-200 bg-white text-slate-700"
+                          }`}>
+                            {item}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className={`rounded-3xl border p-5 ${
+                  isDarkTheme
+                    ? "border-white/10 bg-white/[0.03]"
+                    : "border-slate-300/70 bg-white/92"
+                }`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className={`text-xs uppercase tracking-[0.22em] ${textMuted}`}>Day-wise Plan</p>
+                      <p className={`mt-2 text-lg font-semibold ${textPrimary}`}>
+                        {studyPlan ? studyPlan.mode === "exam_week" ? "Exam week sprint" : "Steady revision rhythm" : "Generate a planner to see your schedule"}
+                      </p>
+                    </div>
+                    {studyPlan?.urgency ? (
+                      <span className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] ${
+                        studyPlan.urgency === "critical"
+                          ? isDarkTheme
+                            ? "bg-rose-500/15 text-rose-200"
+                            : "bg-rose-100 text-rose-700"
+                          : studyPlan.urgency === "high"
+                            ? isDarkTheme
+                              ? "bg-amber-500/15 text-amber-200"
+                              : "bg-amber-100 text-amber-700"
+                            : isDarkTheme
+                              ? "bg-emerald-500/15 text-emerald-200"
+                              : "bg-emerald-100 text-emerald-700"
+                      }`}>
+                        {studyPlan.urgency}
+                      </span>
+                    ) : null}
+                  </div>
+
+                  <div className="mt-4 space-y-3">
+                    {(studyPlan?.dailyPlan || []).length ? (
+                      studyPlan?.dailyPlan.map((day) => (
+                        <div
+                          key={`${day.dayLabel}-${day.date}`}
+                          className={`rounded-2xl border px-4 py-4 ${
+                            isDarkTheme
+                              ? "border-white/10 bg-white/[0.03]"
+                              : "border-slate-200 bg-slate-50/90"
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div>
+                              <p className={`text-sm font-semibold ${textPrimary}`}>{day.dayLabel}</p>
+                              <p className={`mt-1 text-xs ${textMuted}`}>{day.date} · {day.minutes} mins</p>
+                            </div>
+                            <p className={`text-sm ${textSecondary}`}>{day.focus}</p>
+                          </div>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {day.topicTitles.map((topic) => (
+                              <button
+                                key={`${day.dayLabel}-${topic}`}
+                                type="button"
+                                onClick={() => handleTopicSelect({ title: topic })}
+                                className={`rounded-full border px-3 py-1.5 text-xs ${
+                                  isDarkTheme
+                                    ? "border-white/10 bg-white/[0.04] text-white/75"
+                                    : "border-slate-300 bg-white text-slate-700"
+                                }`}
+                              >
+                                {topic}
+                              </button>
+                            ))}
+                          </div>
+                          <p className={`mt-3 text-sm ${textSecondary}`}>{day.checkpoint}</p>
+                        </div>
+                      ))
+                    ) : (
+                      <div className={`rounded-2xl border border-dashed px-4 py-8 text-sm ${
+                        isDarkTheme
+                          ? "border-white/10 bg-white/[0.02] text-white/45"
+                          : "border-slate-200 bg-slate-50 text-slate-500"
+                      }`}>
+                        Pick your exam date and we will build a personalized revision path for this subject.
+                      </div>
+                    )}
+                  </div>
+
+                  {studyPlan?.finalRevisionChecklist.length ? (
+                    <div className="mt-5">
+                      <p className={`text-xs uppercase tracking-[0.22em] ${textMuted}`}>Final Revision Checklist</p>
+                      <div className="mt-3 grid gap-2 md:grid-cols-2">
+                        {studyPlan.finalRevisionChecklist.map((item) => (
+                          <div
+                            key={item}
+                            className={`rounded-2xl border px-4 py-3 text-sm ${
+                              isDarkTheme
+                                ? "border-white/10 bg-white/[0.03] text-white/75"
+                                : "border-slate-200 bg-white text-slate-700"
+                            }`}
+                          >
+                            {item}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </div>
           </div>
         </motion.div>
       </AnimatePresence>

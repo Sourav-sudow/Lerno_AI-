@@ -1,18 +1,28 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { SparklesCore } from "../ui/sparkles";
 import {
   clearCachedSession,
-  clearPendingSignupRole,
+  clearPendingSignupContext,
   fetchSession,
   getCachedSession,
   getDefaultRouteForSession,
-  setPendingSignupRole,
-  type UserRole,
+  getPendingSignupContext,
+  setPendingSignupContext,
   verifyOtpAndBootstrap,
+  type UserRole,
 } from "../services/appSession";
 import { API_BASE_URL } from "../services/apiBaseUrl";
+import {
+  getCampusSelectionSummary,
+  getDepartmentsForUniversity,
+  getProgramsForDepartment,
+  getTermsForProgram,
+  getUniversityDomainMatch,
+  getUniversityRegistry,
+} from "../services/campusData";
+
 const OTP_LENGTH = 6;
 
 type OtpResponse = {
@@ -45,10 +55,32 @@ type LoginPageProps = {
 
 export default function LoginPage({ mode = "login" }: LoginPageProps) {
   const navigate = useNavigate();
-  const [email, setEmail] = useState("");
+  const location = useLocation();
+  const pendingContext = useMemo(() => getPendingSignupContext(), []);
+  const universities = useMemo(() => getUniversityRegistry(), []);
+  const searchParams = useMemo(() => new URLSearchParams(location.search), [location.search]);
+  const queryReferral = searchParams.get("ref") || "";
+  const queryUniversity = searchParams.get("university") || "";
+
+  const [email, setEmail] = useState(pendingContext?.email || "");
   const [otp, setOtp] = useState("");
   const [step, setStep] = useState<"email" | "otp">("email");
-  const [selectedRole, setSelectedRole] = useState<UserRole>("student");
+  const [selectedRole] = useState<UserRole>(
+    pendingContext?.role === "faculty" ? "student" : pendingContext?.role || "student"
+  );
+  const [selectedUniversityId, setSelectedUniversityId] = useState(
+    pendingContext?.universityId || queryUniversity || universities[0]?.id || ""
+  );
+  const [selectedDepartmentId, setSelectedDepartmentId] = useState(
+    pendingContext?.departmentId || ""
+  );
+  const [selectedProgramId, setSelectedProgramId] = useState(
+    pendingContext?.programId || ""
+  );
+  const [selectedTermId, setSelectedTermId] = useState(pendingContext?.termId || "");
+  const [referralCode, setReferralCode] = useState(
+    pendingContext?.referredByCode || queryReferral || ""
+  );
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [loading, setLoading] = useState(false);
@@ -56,6 +88,28 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
   const [debugOtp, setDebugOtp] = useState("");
 
   const maskedEmail = useMemo(() => maskEmail(email), [email]);
+  const departments = useMemo(
+    () => getDepartmentsForUniversity(selectedUniversityId),
+    [selectedUniversityId]
+  );
+  const programs = useMemo(
+    () => getProgramsForDepartment(selectedUniversityId, selectedDepartmentId),
+    [selectedDepartmentId, selectedUniversityId]
+  );
+  const terms = useMemo(
+    () => getTermsForProgram(selectedUniversityId, selectedDepartmentId, selectedProgramId),
+    [selectedDepartmentId, selectedProgramId, selectedUniversityId]
+  );
+  const selectionSummary = useMemo(
+    () =>
+      getCampusSelectionSummary({
+        universityId: selectedUniversityId,
+        departmentId: selectedDepartmentId,
+        programId: selectedProgramId,
+        termId: selectedTermId,
+      }),
+    [selectedDepartmentId, selectedProgramId, selectedTermId, selectedUniversityId]
+  );
 
   useEffect(() => {
     const session = getCachedSession();
@@ -66,9 +120,37 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
 
   useEffect(() => {
     if (mode === "login") {
-      clearPendingSignupRole();
+      clearPendingSignupContext();
     }
   }, [mode]);
+
+  useEffect(() => {
+    if (mode !== "signup") return;
+    if (queryReferral) {
+      setReferralCode(queryReferral.toUpperCase());
+    }
+    if (queryUniversity) {
+      setSelectedUniversityId(queryUniversity);
+    }
+  }, [mode, queryReferral, queryUniversity]);
+
+  useEffect(() => {
+    if (!selectedDepartmentId && departments[0]?.id) {
+      setSelectedDepartmentId(departments[0].id);
+    }
+  }, [departments, selectedDepartmentId]);
+
+  useEffect(() => {
+    if (!selectedProgramId && programs[0]?.id) {
+      setSelectedProgramId(programs[0].id);
+    }
+  }, [programs, selectedProgramId]);
+
+  useEffect(() => {
+    if (!selectedTermId && terms[0]?.id) {
+      setSelectedTermId(terms[0].id);
+    }
+  }, [selectedTermId, terms]);
 
   useEffect(() => {
     if (step !== "otp" || resendCountdown <= 0) return;
@@ -80,7 +162,27 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
     return () => window.clearInterval(timer);
   }, [step, resendCountdown]);
 
-  const isValidCollegeEmail = (value: string) => /@krmu\.edu\.in$/i.test(value.trim());
+  const isValidEmail = (value: string) =>
+    /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/i.test(value.trim());
+
+  const persistPendingContext = (normalizedEmail: string) => {
+    setPendingSignupContext({
+      email: normalizedEmail,
+      role: selectedRole,
+      universityId: selectedUniversityId,
+      universitySlug: selectionSummary.universitySlug,
+      departmentId: selectedDepartmentId,
+      programId: selectedProgramId,
+      termId: selectedTermId,
+      departmentName: selectionSummary.departmentName,
+      programName: selectionSummary.programName,
+      termName: selectionSummary.termName,
+      referredByCode: referralCode.trim(),
+      verificationStatus: getUniversityDomainMatch(normalizedEmail, selectedUniversityId)
+        ? "trusted_domain"
+        : "otp_verified",
+    });
+  };
 
   const handleSendOtp = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -89,8 +191,13 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
     setDebugOtp("");
 
     const normalizedEmail = email.trim().toLowerCase();
-    if (!isValidCollegeEmail(normalizedEmail)) {
-      setError("Please use your college email (e.g., 2301201171@krmu.edu.in)");
+    if (!isValidEmail(normalizedEmail)) {
+      setError("Please enter a valid email address.");
+      return;
+    }
+
+    if (mode === "signup" && (!selectedUniversityId || !selectedDepartmentId || !selectedProgramId || !selectedTermId)) {
+      setError("Please choose your university, department family, program, and term.");
       return;
     }
 
@@ -106,27 +213,34 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
         }
 
         if (!session.isOnboarded) {
-          if (session.role) {
-            setPendingSignupRole(session.role);
-            setInfo("Please complete your onboarding to continue.");
-            navigate("/onboarding", { replace: true });
-            return;
-          }
-
-          clearCachedSession();
-          setError("Your account setup is incomplete. Please use Signup to continue.");
+          persistPendingContext(normalizedEmail);
+          setInfo("Please complete your onboarding to continue.");
+          navigate("/onboarding", { replace: true });
           return;
         }
 
-        clearPendingSignupRole();
+        clearPendingSignupContext();
         navigate(getDefaultRouteForSession(session), { replace: true });
         return;
       }
 
+      persistPendingContext(normalizedEmail);
+
       const response = await fetch(`${API_BASE_URL}/send-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: normalizedEmail, mode }),
+        body: JSON.stringify({
+          email: normalizedEmail,
+          mode,
+          role: selectedRole,
+          universityId: selectedUniversityId,
+          universitySlug: selectionSummary.universitySlug,
+          departmentId: selectedDepartmentId,
+          programId: selectedProgramId,
+          termId: selectedTermId,
+          referredByCode: referralCode.trim(),
+          otpChannel: "email",
+        }),
       });
 
       if (!response.ok) {
@@ -139,7 +253,7 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
       setOtp("");
       setInfo(
         data.email_sent
-          ? "OTP sent to your college inbox."
+          ? "OTP sent to your inbox."
           : data.message || "OTP generated in demo mode."
       );
       setDebugOtp(data.debug_otp || "");
@@ -163,7 +277,19 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
 
     setLoading(true);
     try {
-      const data = await verifyOtpAndBootstrap(email, otp.trim());
+      const data = await verifyOtpAndBootstrap({
+        email,
+        otp: otp.trim(),
+        mode,
+        role: selectedRole,
+        universityId: selectedUniversityId,
+        universitySlug: selectionSummary.universitySlug,
+        departmentId: selectedDepartmentId,
+        programId: selectedProgramId,
+        termId: selectedTermId,
+        referredByCode: referralCode.trim(),
+        otpChannel: "email",
+      });
       if (mode === "login") {
         if (!data.session.exists) {
           clearCachedSession();
@@ -174,21 +300,13 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
         }
 
         if (!data.session.isOnboarded) {
-          if (data.session.role) {
-            setPendingSignupRole(data.session.role);
-            setInfo("Please complete your onboarding to continue.");
-            navigate("/onboarding", { replace: true });
-            return;
-          }
-
-          clearCachedSession();
-          setStep("email");
-          setOtp("");
-          setError("Your account setup is incomplete. Please use Signup to continue.");
+          persistPendingContext(email);
+          setInfo("Please complete your onboarding to continue.");
+          navigate("/onboarding", { replace: true });
           return;
         }
 
-        clearPendingSignupRole();
+        clearPendingSignupContext();
         navigate(getDefaultRouteForSession(data.session), { replace: true });
         return;
       }
@@ -201,7 +319,7 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
         return;
       }
 
-      setPendingSignupRole(data.session.role || selectedRole);
+      persistPendingContext(email);
       navigate("/onboarding", { replace: true });
     } catch (err) {
       setError((err as Error).message || "Failed to verify OTP.");
@@ -221,7 +339,18 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
       const response = await fetch(`${API_BASE_URL}/send-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, mode }),
+        body: JSON.stringify({
+          email,
+          mode,
+          role: selectedRole,
+          universityId: selectedUniversityId,
+          universitySlug: selectionSummary.universitySlug,
+          departmentId: selectedDepartmentId,
+          programId: selectedProgramId,
+          termId: selectedTermId,
+          referredByCode: referralCode.trim(),
+          otpChannel: "email",
+        }),
       });
 
       if (!response.ok) {
@@ -245,7 +374,7 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
 
   const handleBackToEmail = () => {
     if (mode === "signup") {
-      clearPendingSignupRole();
+      clearPendingSignupContext();
     }
     setStep("email");
     setOtp("");
@@ -273,7 +402,7 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
       <div className="pointer-events-none absolute right-[-8%] top-[50%] h-96 w-96 rounded-full bg-fuchsia-500/10 blur-3xl" />
 
       <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-7xl items-center px-6 py-10 md:px-10">
-        <div className="grid w-full items-center gap-10 lg:grid-cols-[1.1fr_0.9fr]">
+        <div className="grid w-full items-center gap-10 lg:grid-cols-[1.08fr_0.92fr]">
           <motion.div
             initial={{ opacity: 0, x: -24 }}
             animate={{ opacity: 1, x: 0 }}
@@ -282,32 +411,29 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
           >
             <div className="inline-flex items-center gap-2 rounded-full border border-cyan-400/20 bg-white/5 px-4 py-2 text-sm text-cyan-200/90 backdrop-blur-xl">
               <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_14px_rgba(52,211,153,0.8)]" />
-              Secure Student Access
+              Pilot-Ready Campus Access
             </div>
             <h1 className="mt-7 max-w-xl font-serif text-6xl leading-[1.05] text-white">
-              Learn smarter with a login flow that feels like a real product.
+              {mode === "login"
+                ? "Log into your student workspace without single-college lock-in."
+                : "Create a multi-campus student profile in one guided flow."}
             </h1>
             <p className="mt-5 max-w-xl text-lg leading-8 text-slate-300/80">
               {mode === "login"
-                ? "Direct login for existing users, plus a cleaner entry experience for Lerno.ai."
-                : "OTP-based signup for your college email, AI-assisted lessons, and a cleaner entry experience for Lerno.ai."}
+                ? "Existing students can re-enter directly, while their campus context stays attached to the account."
+                : "Choose your university, department family, program, and term before OTP so Lerno can route you into the right pilot content pack."}
             </p>
 
             <div className="mt-10 grid max-w-2xl gap-4 md:grid-cols-3">
               {[
-                ["College-only", "Only `@krmu.edu.in` users can sign in."],
+                ["Multi-University", "The same auth flow now works for multiple campuses, not just one domain."],
                 [
-                  mode === "login" ? "Direct Login" : "OTP Security",
+                  mode === "login" ? "Campus-Aware Login" : "OTP Verification",
                   mode === "login"
-                    ? "Existing onboarded users can enter directly after email verification in Firestore."
-                    : "A 6-digit verification step before access.",
+                    ? "Returning users keep their university, program, and term context."
+                    : "Signup context is captured before OTP so onboarding stays structured.",
                 ],
-                [
-                  "Fast Entry",
-                  mode === "login"
-                    ? "Clean flow from account lookup to the right dashboard."
-                    : "Clean flow from inbox to learning dashboard.",
-                ],
+                ["Pilot Packs", "Starter content is ready for CS, Management, and Commerce families."],
               ].map(([title, copy]) => (
                 <div
                   key={title}
@@ -332,21 +458,19 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
               <div className="border-b border-white/10 px-7 py-6 md:px-8">
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <p className="text-sm uppercase tracking-[0.34em] text-white/35">
-                      Lerno.ai
-                    </p>
+                    <p className="text-sm uppercase tracking-[0.34em] text-white/35">Lerno.ai</p>
                     <h2 className="mt-3 text-3xl font-semibold text-white">
                       {step === "email"
                         ? mode === "login"
                           ? "Welcome back"
-                          : "Create your account"
+                          : "Create your pilot account"
                         : "Verify OTP"}
                     </h2>
                     <p className="mt-2 text-sm leading-6 text-slate-300/70">
                       {step === "email"
                         ? mode === "login"
-                          ? "Enter your college email. If your account already exists, you will enter directly."
-                          : "Choose your role, enter your college email, and verify OTP to begin signup."
+                          ? "Enter the email tied to your Lerno account."
+                          : "Select your campus context, then verify OTP to unlock student onboarding."
                         : `Enter the 6-digit code sent to ${maskedEmail}.`}
                     </p>
                   </div>
@@ -363,48 +487,117 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
                 {step === "email" ? (
                   <form onSubmit={handleSendOtp} className="space-y-6">
                     {mode === "signup" ? (
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        {(["student", "faculty"] as UserRole[]).map((role) => {
-                          const active = selectedRole === role;
-                          return (
-                            <button
-                              key={role}
-                              type="button"
-                              onClick={() => setSelectedRole(role)}
-                              className={`rounded-3xl border px-4 py-4 text-left transition ${
-                                active
-                                  ? "border-cyan-400/40 bg-cyan-400/10 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]"
-                                  : "border-white/10 bg-white/[0.03] hover:bg-white/[0.06]"
-                              }`}
-                            >
-                              <p className="text-base font-semibold capitalize text-white">{role}</p>
-                              <p className="mt-1 text-sm text-slate-300/70">
-                                {role === "student"
-                                  ? "Personalized learning workspace with AI study tools."
-                                  : "Faculty dashboard to manage classes and topic videos."}
-                              </p>
-                            </button>
-                          );
-                        })}
-                      </div>
+                      <>
+                        <div className="rounded-3xl border border-cyan-400/20 bg-cyan-400/8 px-4 py-4 text-sm text-cyan-100/90">
+                          Student-only public app flow. Choose your campus and continue into the learner workspace.
+                        </div>
+
+                        <div className="grid gap-4 md:grid-cols-2">
+                          <select
+                            value={selectedUniversityId}
+                            onChange={(e) => {
+                              setSelectedUniversityId(e.target.value);
+                              setSelectedDepartmentId("");
+                              setSelectedProgramId("");
+                              setSelectedTermId("");
+                            }}
+                            className="rounded-3xl border border-white/10 bg-white/[0.04] px-4 py-4 text-white outline-none"
+                          >
+                            {universities.map((university) => (
+                              <option key={university.id} value={university.id} className="bg-slate-950">
+                                {university.name}
+                              </option>
+                            ))}
+                          </select>
+
+                          <select
+                            value={selectedDepartmentId}
+                            onChange={(e) => {
+                              setSelectedDepartmentId(e.target.value);
+                              setSelectedProgramId("");
+                              setSelectedTermId("");
+                            }}
+                            className="rounded-3xl border border-white/10 bg-white/[0.04] px-4 py-4 text-white outline-none"
+                          >
+                            {departments.map((department) => (
+                              <option key={department.id} value={department.id} className="bg-slate-950">
+                                {department.name}
+                              </option>
+                            ))}
+                          </select>
+
+                          <select
+                            value={selectedProgramId}
+                            onChange={(e) => {
+                              setSelectedProgramId(e.target.value);
+                              setSelectedTermId("");
+                            }}
+                            className="rounded-3xl border border-white/10 bg-white/[0.04] px-4 py-4 text-white outline-none"
+                          >
+                            {programs.map((program) => (
+                              <option key={program.id} value={program.id} className="bg-slate-950">
+                                {program.name}
+                              </option>
+                            ))}
+                          </select>
+
+                          <select
+                            value={selectedTermId}
+                            onChange={(e) => setSelectedTermId(e.target.value)}
+                            className="rounded-3xl border border-white/10 bg-white/[0.04] px-4 py-4 text-white outline-none"
+                          >
+                            {terms.map((term) => (
+                              <option key={term.id} value={term.id} className="bg-slate-950">
+                                {term.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="rounded-3xl border border-cyan-400/15 bg-cyan-400/5 px-4 py-4 text-sm text-cyan-100/85">
+                          <span className="font-semibold">{selectionSummary.universityName || "Campus not selected"}</span>
+                          {" · "}
+                          {selectionSummary.departmentName || "Department family"}
+                          {" · "}
+                          {selectionSummary.programName || "Program"}
+                          {" · "}
+                          {selectionSummary.termName || "Term"}
+                        </div>
+                      </>
                     ) : null}
 
                     <div>
                       <label className="mb-2 block text-sm font-medium text-slate-300">
-                        College Email
+                        {mode === "login" ? "Account Email" : "Email for OTP"}
                       </label>
                       <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-2 focus-within:border-cyan-400/60 focus-within:shadow-[0_0_0_1px_rgba(34,211,238,0.3)]">
                         <input
                           type="email"
                           value={email}
                           onChange={(e) => setEmail(e.target.value)}
-                          placeholder="2301201171@krmu.edu.in"
+                          placeholder={mode === "login" ? "student@college.edu" : "you@college.edu"}
                           className="w-full rounded-[20px] bg-transparent px-4 py-4 text-lg text-white outline-none placeholder:text-slate-500"
                           autoComplete="email"
                           required
                         />
                       </div>
                     </div>
+
+                    {mode === "signup" ? (
+                      <div>
+                        <label className="mb-2 block text-sm font-medium text-slate-300">
+                          Referral Code (Optional)
+                        </label>
+                        <div className="rounded-3xl border border-white/10 bg-white/[0.04] p-2">
+                          <input
+                            value={referralCode}
+                            onChange={(e) => setReferralCode(e.target.value.toUpperCase())}
+                            placeholder="Friend or ambassador referral code"
+                            className="w-full rounded-[20px] bg-transparent px-4 py-4 text-lg text-white outline-none placeholder:text-slate-500"
+                          />
+                        </div>
+                      </div>
+                    ) : null}
 
                     {error ? (
                       <div className="rounded-2xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
@@ -428,8 +621,8 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
                           ? "Checking account..."
                           : "Sending OTP..."
                         : mode === "login"
-                          ? "Login Directly"
-                          : `Send OTP for ${selectedRole === "faculty" ? "Faculty" : "Student"} Signup`}
+                          ? "Continue to Workspace"
+                          : "Send OTP for Student Signup"}
                     </button>
                   </form>
                 ) : (
@@ -513,8 +706,9 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
               <div className="border-t border-white/10 px-7 py-4 text-xs text-slate-400 md:px-8">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <p>
-                    Only college email addresses ending in{" "}
-                    <span className="text-white/80">@krmu.edu.in</span> are allowed.
+                    {mode === "login"
+                      ? "Student login works across supported pilot campuses."
+                      : "Signup currently supports starter packs for CS / Engineering, Management, and Commerce."}
                   </p>
                   <button
                     type="button"
