@@ -58,33 +58,53 @@ async function searchYoutubeVideo(query: string): Promise<string | null> {
   const cachedUrl = localStorage.getItem(cacheKey);
   if (cachedUrl) return cachedUrl;
 
-  const params = new URLSearchParams({
-    part: "snippet",
-    maxResults: "1",
-    q: query,
-    type: "video",
-    videoEmbeddable: "true",
-    key: apiKey,
-  });
+  const runSearch = async (options: { embeddable: boolean; maxResults: number }) => {
+    const params = new URLSearchParams({
+      part: "snippet",
+      maxResults: String(options.maxResults),
+      q: query,
+      type: "video",
+      key: apiKey,
+    });
 
-  const response = await fetch(
-    `https://www.googleapis.com/youtube/v3/search?${params.toString()}`
-  );
+    if (options.embeddable) {
+      params.set("videoEmbeddable", "true");
+    }
 
-  if (!response.ok) {
-    throw new Error("Failed to fetch topic video from YouTube.");
+    const response = await fetch(
+      `https://www.googleapis.com/youtube/v3/search?${params.toString()}`
+    );
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = await response.json();
+    const items = Array.isArray(data?.items) ? data.items : [];
+
+    for (const item of items) {
+      const videoId = item?.id?.videoId;
+      const embedUrl = normalizeEmbedUrl(String(videoId || ""));
+      if (embedUrl) {
+        localStorage.setItem(cacheKey, embedUrl);
+        return embedUrl;
+      }
+    }
+
+    return null;
+  };
+
+  try {
+    const strictResult = await runSearch({ embeddable: true, maxResults: 3 });
+    if (strictResult) return strictResult;
+
+    const relaxedResult = await runSearch({ embeddable: false, maxResults: 5 });
+    if (relaxedResult) return relaxedResult;
+  } catch (error) {
+    console.warn("YouTube search failed for query:", query, error);
   }
 
-  const data = await response.json();
-  const videoId = data?.items?.[0]?.id?.videoId;
-  if (!videoId) return null;
-
-  const embedUrl = normalizeEmbedUrl(videoId);
-  if (embedUrl) {
-    localStorage.setItem(cacheKey, embedUrl);
-  }
-
-  return embedUrl || null;
+  return null;
 }
 
 export async function resolveTopicVideo(input: {
