@@ -106,12 +106,14 @@ async function searchYoutubeVideo(input: { query: string; topic: string }): Prom
     }
 
     const data = await response.json();
-    const items = Array.isArray(data?.items) ? data.items : [];
+    const items: Array<{ id?: { videoId?: string } }> = Array.isArray(data?.items)
+      ? data.items
+      : [];
 
     // Extract video IDs from search results
     const videoIds = items
-      .map((item) => item?.id?.videoId)
-      .filter((id) => !!id);
+      .map((item: { id?: { videoId?: string } }) => item?.id?.videoId)
+      .filter((id: string | undefined): id is string => Boolean(id));
 
     if (videoIds.length === 0) return null;
 
@@ -161,7 +163,7 @@ async function searchYoutubeVideo(input: { query: string; topic: string }): Prom
 
       // Filter out shorts and rank by title relevance first, then popularity.
       const rankedVideos = videoIds
-        .filter((videoId) => {
+        .filter((videoId: string) => {
           const meta = statsMap[videoId];
           if (!meta) return false;
           if (meta.durationSec > 0 && meta.durationSec < 180) return false; // Shorts-like videos
@@ -169,14 +171,14 @@ async function searchYoutubeVideo(input: { query: string; topic: string }): Prom
           if (loweredTitle.includes("shorts") || loweredTitle.includes("#shorts")) return false;
           return true;
         })
-        .map((videoId) => ({
+        .map((videoId: string) => ({
           videoId,
           score:
             scoreVideoTitle(statsMap[videoId]?.title || "", input.topic) * 1000000 +
             (statsMap[videoId]?.viewCount || 0) +
             (statsMap[videoId]?.likeCount || 0) * 10,
         }))
-        .sort((a, b) => b.score - a.score);
+        .sort((a: { videoId: string; score: number }, b: { videoId: string; score: number }) => b.score - a.score);
 
       // Return first ranked video
       if (rankedVideos.length > 0) {
