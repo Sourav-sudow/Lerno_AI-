@@ -9,6 +9,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { generateExamQuestions, GeneratedExamQuestions } from "../services/openRouterExamQuestions";
 import { resolveTopicVideo } from "../services/youtubeVideos";
+import { askAITutor } from "../services/openRouterTutor";
 import {
   clearCachedSession,
   fetchSession,
@@ -160,6 +161,14 @@ function buildQuickNotes(input: {
       : `Understand where this topic fits in your syllabus.`,
     `Focus on the important terms, examples, and exam-friendly explanation.`,
   ];
+}
+
+function parseQuickNotesFromAI(text: string) {
+  return text
+    .split(/\n+/)
+    .map((line) => line.replace(/^[-*\d.)\s]+/, "").trim())
+    .filter((line) => line.length > 8)
+    .slice(0, 4);
 }
 
 function getDefaultExamDate() {
@@ -328,6 +337,8 @@ const LearningPage = () => {
   const [examQuestions, setExamQuestions] = useState<GeneratedExamQuestions | null>(null);
   const [examQuestionsLoading, setExamQuestionsLoading] = useState(false);
   const [examQuestionsError, setExamQuestionsError] = useState<string | null>(null);
+  const [quickNotesFromApi, setQuickNotesFromApi] = useState<string[]>([]);
+  const [quickNotesLoading, setQuickNotesLoading] = useState(false);
   const [plannerExamDate, setPlannerExamDate] = useState(getDefaultExamDate);
   const [plannerDailyMinutes, setPlannerDailyMinutes] = useState(60);
   const [plannerConfidence, setPlannerConfidence] = useState<"low" | "medium" | "high">("medium");
@@ -344,7 +355,7 @@ const LearningPage = () => {
   const isCurrentTopicBookmarked = bookmarkedTopics.some(
     (topic) => topic.title.toLowerCase() === displayTitle.toLowerCase()
   );
-  const quickNotes = useMemo(
+  const fallbackQuickNotes = useMemo(
     () =>
       buildQuickNotes({
         title: displayTitle,
@@ -353,6 +364,7 @@ const LearningPage = () => {
       }),
     [displayNarration, displayTitle, selectedUnitTitle]
   );
+  const quickNotes = quickNotesFromApi.length ? quickNotesFromApi : fallbackQuickNotes;
   const subjectRevisionPack = useMemo(() => {
     if (!syllabusSubjectTitle) return [];
     return allTopics
@@ -678,6 +690,43 @@ const LearningPage = () => {
   }, [displayTitle, displayNarration]);
 
   useEffect(() => {
+    if (!displayTitle) {
+      setQuickNotesFromApi([]);
+      setQuickNotesLoading(false);
+      return;
+    }
+
+    let active = true;
+    const generateQuickNotes = async () => {
+      setQuickNotesLoading(true);
+      try {
+        const response = await askAITutor({
+          topic: displayTitle,
+          lessonContent: displayNarration,
+          question:
+            "Give exactly 4 concise revision bullet points for this topic. Keep each under 14 words. No intro, no outro.",
+        });
+        if (!active) return;
+        const parsed = parseQuickNotesFromAI(response);
+        setQuickNotesFromApi(parsed);
+      } catch {
+        if (!active) return;
+        setQuickNotesFromApi([]);
+      } finally {
+        if (active) {
+          setQuickNotesLoading(false);
+        }
+      }
+    };
+
+    generateQuickNotes();
+
+    return () => {
+      active = false;
+    };
+  }, [displayNarration, displayTitle]);
+
+  useEffect(() => {
     setStudyPlan(null);
     setStudyPlanError(null);
   }, [displayTitle, syllabusSubjectTitle]);
@@ -952,6 +1001,14 @@ const LearningPage = () => {
       openUnitSuggestion(match);
       return;
     }
+
+    handleTopicSelect({
+      title: search.trim(),
+      subjectTitle: syllabusSubjectTitle || "Custom Topic",
+      unitTitle: selectedUnitTitle || "Direct Search",
+      unitTopics: selectedUnitTopicsDisplay,
+      narration: `Auto-selected from search query: ${search.trim()}`,
+    });
 
     setSearchDropdownOpen(false);
   };
@@ -2115,6 +2172,11 @@ const LearningPage = () => {
                 transition={{ duration: 0.5, delay: 0.2 }}
                 className={`flex-grow overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent ${textSecondary}`}
               >
+                {quickNotesLoading ? (
+                  <div className={`mb-3 rounded-2xl border px-4 py-3 text-sm ${isDarkTheme ? "border-white/10 bg-white/[0.03] text-white/60" : "border-slate-300/70 bg-slate-50/90 text-slate-600"}`}>
+                    Generating API quick notes...
+                  </div>
+                ) : null}
                 <div className="space-y-3">
                   {quickNotes.map((note, index) => (
                     <div
