@@ -24,7 +24,6 @@ import { trackEvent } from "../services/activityTracker";
 import { buildCoursesDataFromContentPack } from "../services/campusData";
 import { fetchCampusGrowth, type CampusGrowthData } from "../services/campusGrowth";
 import { createShareArtifact } from "../services/shareArtifacts";
-import { buildStudyPlan, type StudyPlan } from "../services/studyPlanner";
 
 const RECENT_TOPICS_STORAGE_KEY = "lernoRecentTopics";
 const BOOKMARKED_TOPICS_STORAGE_KEY = "lernoBookmarkedTopics";
@@ -169,12 +168,6 @@ function parseQuickNotesFromAI(text: string) {
     .map((line) => line.replace(/^[-*\d.)\s]+/, "").trim())
     .filter((line) => line.length > 8)
     .slice(0, 4);
-}
-
-function getDefaultExamDate() {
-  const examDate = new Date();
-  examDate.setDate(examDate.getDate() + 7);
-  return examDate.toISOString().slice(0, 10);
 }
 
 const LearningPage = () => {
@@ -339,12 +332,6 @@ const LearningPage = () => {
   const [examQuestionsError, setExamQuestionsError] = useState<string | null>(null);
   const [quickNotesFromApi, setQuickNotesFromApi] = useState<string[]>([]);
   const [quickNotesLoading, setQuickNotesLoading] = useState(false);
-  const [plannerExamDate, setPlannerExamDate] = useState(getDefaultExamDate);
-  const [plannerDailyMinutes, setPlannerDailyMinutes] = useState(60);
-  const [plannerConfidence, setPlannerConfidence] = useState<"low" | "medium" | "high">("medium");
-  const [studyPlan, setStudyPlan] = useState<StudyPlan | null>(null);
-  const [studyPlanLoading, setStudyPlanLoading] = useState(false);
-  const [studyPlanError, setStudyPlanError] = useState<string | null>(null);
   const [examWeekLaunchPending, setExamWeekLaunchPending] = useState(false);
 
   const displayTitle = selectedTopicTitle || "";
@@ -399,7 +386,6 @@ const LearningPage = () => {
   const currentTopicPracticeDone = completedPracticeTopics.includes(
     displayTitle.toLowerCase()
   );
-  const plannerIsExamWeek = (studyPlan?.daysUntilExam ?? 99) <= 7;
 
   function handleNextSlide() {
     const totalSlides = Math.min(FetchData.length, 5);
@@ -727,11 +713,6 @@ const LearningPage = () => {
   }, [displayNarration, displayTitle]);
 
   useEffect(() => {
-    setStudyPlan(null);
-    setStudyPlanError(null);
-  }, [displayTitle, syllabusSubjectTitle]);
-
-  useEffect(() => {
     if (!displayTitle) return;
 
     const lessonKey = [
@@ -824,16 +805,16 @@ const LearningPage = () => {
     );
     setSearch("");
 
-    let resolvedVideoUrl = matchedTopic.videoUrl || "";
+    let resolvedVideoUrl = "";
     try {
       resolvedVideoUrl =
-        matchedTopic.videoUrl ||
         (await resolveTopicVideo({
           title: matchedTopic.title,
           universityId: campusSelection.universityId,
           subjectTitle: matchedTopic.subjectTitle,
           unitTitle: matchedTopic.unitTitle,
         })) ||
+        matchedTopic.videoUrl ||
         "";
     } catch {
       resolvedVideoUrl = matchedTopic.videoUrl || "";
@@ -1256,37 +1237,6 @@ const LearningPage = () => {
     }
   };
 
-  const handleGenerateStudyPlan = async () => {
-    if (!plannerExamDate) {
-      setStudyPlanError("Please choose your exam date.");
-      return;
-    }
-
-    setStudyPlanLoading(true);
-    setStudyPlanError(null);
-    try {
-      const result = await buildStudyPlan({
-        email: sessionEmail,
-        universityId: campusSelection.universityId,
-        universitySlug: campusSelection.universitySlug,
-        departmentId: campusSelection.departmentId,
-        programId: campusSelection.programId,
-        termId: campusSelection.termId,
-        subjectTitle: syllabusSubjectTitle || displayTitle || "Current subject",
-        topicTitles: plannerTopicTitles,
-        completedPracticeTopics,
-        examDate: plannerExamDate,
-        dailyMinutes: plannerDailyMinutes,
-        confidenceLevel: plannerConfidence,
-      });
-      setStudyPlan(result.plan);
-    } catch (err) {
-      setStudyPlanError((err as Error).message || "Failed to build study plan.");
-    } finally {
-      setStudyPlanLoading(false);
-    }
-  };
-
   const handleOpenExamWeek = () => {
     if (examWeekLaunchPending) return;
 
@@ -1646,12 +1596,12 @@ const LearningPage = () => {
         </aside>
 
         <div className="flex min-w-0 flex-1 flex-col items-center">
-      <div className={`w-full flex flex-col items-center sticky top-0 z-20 pb-6 backdrop-blur-xl relative transition-colors duration-300 ${
+      <div className={`w-full flex flex-col items-center sticky top-0 z-20 pb-6 pt-3 md:pt-4 backdrop-blur-xl relative transition-colors duration-300 ${
         isDarkTheme ? "bg-black/50" : "bg-gradient-to-b from-white/85 via-white/55 to-transparent"
       }`}>
         <div
           ref={profileRef}
-          className="absolute right-2 top-2 md:right-6 md:top-3 flex flex-col items-end"
+          className="absolute right-2 top-2 md:right-6 md:top-4 flex flex-col items-end"
         >
           <button
             type="button"
@@ -1715,7 +1665,7 @@ const LearningPage = () => {
             )}
           </AnimatePresence>
         </div>
-        <div ref={searchRef} className="w-full max-w-2xl relative">
+        <div ref={searchRef} className="mt-1 w-full max-w-4xl px-2 md:px-6 relative">
           <div className="flex items-center gap-3">
             <motion.button
               type="button"
@@ -1740,7 +1690,7 @@ const LearningPage = () => {
                   : { scale: 1 }
               }
               transition={{ duration: 0.38, ease: "easeInOut" }}
-              className={`relative flex h-14 shrink-0 items-center gap-2 overflow-hidden rounded-full border px-4 shadow-[0_20px_60px_-25px_rgba(0,0,0,0.45)] backdrop-blur-xl transition-all duration-300 ${
+              className={`relative flex h-12 shrink-0 items-center gap-2 overflow-hidden rounded-full border px-4 shadow-[0_20px_60px_-25px_rgba(0,0,0,0.45)] backdrop-blur-xl transition-all duration-300 ${
                 isDarkTheme
                   ? "border-cyan-400/20 bg-gradient-to-r from-cyan-500/15 via-sky-500/10 to-fuchsia-500/15 text-white hover:bg-white/10"
                   : "border-cyan-300/80 bg-white/92 text-slate-800 hover:bg-white"
@@ -1781,7 +1731,7 @@ const LearningPage = () => {
                 </span>
               </span>
             </motion.button>
-            <div className={`flex flex-1 items-center gap-3 px-4 py-3 rounded-full shadow-[0_20px_60px_-25px_rgba(0,0,0,0.7)] focus-within:ring-2 focus-within:ring-purple-500/60 backdrop-blur-xl transition-colors duration-300 ${
+            <div className={`flex flex-1 items-center gap-3 px-4 py-2.5 rounded-full shadow-[0_20px_60px_-25px_rgba(0,0,0,0.7)] focus-within:ring-2 focus-within:ring-purple-500/60 backdrop-blur-xl transition-colors duration-300 ${
               isDarkTheme
                 ? "bg-white/5 border border-white/10"
                 : "bg-white/90 border border-slate-300/80"
@@ -1819,10 +1769,10 @@ const LearningPage = () => {
               onKeyDown={handleSearchKeyDown}
               placeholder={
                 lastSelectionHint
-                  ? `Search topic or unit... (e.g., OSI Model, Unit 1)`
-                  : "Search topic or unit... (OSI Model, Network Layer, Unit 2...)"
+                  ? "What do you want to learn today?"
+                  : "What do you want to learn today?"
               }
-              className={`w-full bg-transparent outline-none text-base md:text-lg transition-colors duration-300 ${
+              className={`w-full bg-transparent outline-none text-sm md:text-base transition-colors duration-300 ${
                 isDarkTheme
                   ? "text-white placeholder-white/40"
                   : "text-slate-900 placeholder-slate-500"
@@ -1834,7 +1784,7 @@ const LearningPage = () => {
               onClick={() =>
                 setTheme((prev) => (prev === "dark" ? "light" : "dark"))
               }
-              className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-full border shadow-[0_20px_60px_-25px_rgba(0,0,0,0.45)] backdrop-blur-xl transition-all duration-300 ${
+              className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full border shadow-[0_20px_60px_-25px_rgba(0,0,0,0.45)] backdrop-blur-xl transition-all duration-300 ${
                 isDarkTheme
                   ? "border-white/10 bg-white/5 text-amber-200 hover:bg-white/10"
                   : "border-slate-300/80 bg-white/90 text-slate-700 hover:bg-white"
@@ -2074,27 +2024,6 @@ const LearningPage = () => {
           </div>
         </div>
 
-        <div className="mt-4 flex w-full max-w-4xl flex-wrap justify-center gap-3">
-          {[
-            { label: "Revision Notes", action: () => shareArtifact("notes") },
-            { label: "Topic Explainer", action: () => shareArtifact("explainer") },
-            { label: "Quiz Card", action: () => shareArtifact("quiz") },
-          ].map(({ label, action }) => (
-            <button
-              key={label}
-              type="button"
-              onClick={action}
-              disabled={!displayTitle}
-              className={`rounded-full border px-4 py-2 text-sm font-medium transition ${
-                isDarkTheme
-                  ? "border-white/10 bg-white/5 text-white/80 hover:bg-white/10"
-                  : "border-slate-300/80 bg-white text-slate-700 hover:bg-slate-50"
-              } disabled:cursor-not-allowed disabled:opacity-40`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
       </div>
 
       <AnimatePresence mode="wait" custom={direction}>
@@ -2397,279 +2326,6 @@ const LearningPage = () => {
             <div className="absolute -inset-px bg-gradient-to-r from-amber-500/30 via-transparent to-rose-500/30 rounded-xl opacity-0 group-hover:opacity-100 blur-xl transition-opacity duration-500"></div>
           </div>
 
-          <div className={`relative overflow-hidden rounded-xl border p-6 md:col-span-3 backdrop-blur-sm transition-all duration-300 ${glassCard}`}>
-            <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/15 via-sky-500/10 to-fuchsia-500/10 opacity-80"></div>
-            <div className="absolute inset-0 bg-grid-white/[0.02] bg-[size:20px_20px]"></div>
-            <div className="relative z-10">
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div>
-                  <p className={`text-xs uppercase tracking-[0.28em] ${textMuted}`}>
-                    Exam Week Mode
-                  </p>
-                  <h3 className={`mt-2 text-2xl font-semibold ${textPrimary}`}>
-                    Personalized Study Planner
-                  </h3>
-                  <p className={`mt-3 max-w-2xl text-sm ${textSecondary}`}>
-                    Build a day-wise revision plan for the current subject, tighten the last 7 days before the exam, and keep your highest-yield topics visible.
-                  </p>
-                </div>
-                {studyPlan ? (
-                  <div className={`rounded-3xl border px-4 py-4 ${
-                    plannerIsExamWeek
-                      ? isDarkTheme
-                        ? "border-rose-400/20 bg-rose-500/10 text-rose-100"
-                        : "border-rose-200 bg-rose-50 text-rose-700"
-                      : isDarkTheme
-                        ? "border-cyan-400/20 bg-cyan-500/10 text-cyan-100"
-                        : "border-cyan-200 bg-cyan-50 text-cyan-700"
-                  }`}>
-                    <p className="text-xs uppercase tracking-[0.22em] opacity-75">
-                      {plannerIsExamWeek ? "Live Exam Week" : "Study Mode"}
-                    </p>
-                    <p className="mt-2 text-lg font-semibold">
-                      {studyPlan.daysUntilExam} day{studyPlan.daysUntilExam === 1 ? "" : "s"} left
-                    </p>
-                    <p className="mt-1 text-sm opacity-80">{studyPlan.summary}</p>
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="mt-6 grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
-                <div className={`rounded-3xl border p-5 ${
-                  isDarkTheme
-                    ? "border-white/10 bg-white/[0.03]"
-                    : "border-slate-300/70 bg-white/92"
-                }`}>
-                  <div className="grid gap-4 md:grid-cols-3">
-                    <label className="space-y-2 text-sm">
-                      <span className={textMuted}>Exam date</span>
-                      <input
-                        type="date"
-                        value={plannerExamDate}
-                        onChange={(e) => setPlannerExamDate(e.target.value)}
-                        className={`w-full rounded-2xl border px-4 py-3 outline-none ${
-                          isDarkTheme
-                            ? "border-white/10 bg-white/[0.04] text-white"
-                            : "border-slate-300 bg-white text-slate-900"
-                        }`}
-                      />
-                    </label>
-                    <label className="space-y-2 text-sm">
-                      <span className={textMuted}>Daily minutes</span>
-                      <input
-                        type="number"
-                        min={20}
-                        max={240}
-                        step={10}
-                        value={plannerDailyMinutes}
-                        onChange={(e) => setPlannerDailyMinutes(Number(e.target.value) || 60)}
-                        className={`w-full rounded-2xl border px-4 py-3 outline-none ${
-                          isDarkTheme
-                            ? "border-white/10 bg-white/[0.04] text-white"
-                            : "border-slate-300 bg-white text-slate-900"
-                        }`}
-                      />
-                    </label>
-                    <label className="space-y-2 text-sm">
-                      <span className={textMuted}>Confidence</span>
-                      <select
-                        value={plannerConfidence}
-                        onChange={(e) => setPlannerConfidence(e.target.value as "low" | "medium" | "high")}
-                        className={`w-full rounded-2xl border px-4 py-3 outline-none ${
-                          isDarkTheme
-                            ? "border-white/10 bg-white/[0.04] text-white"
-                            : "border-slate-300 bg-white text-slate-900"
-                        }`}
-                      >
-                        <option value="low">Need help</option>
-                        <option value="medium">Getting there</option>
-                        <option value="high">Almost ready</option>
-                      </select>
-                    </label>
-                  </div>
-
-                  <div className="mt-4 flex flex-wrap gap-3">
-                    <button
-                      type="button"
-                      onClick={handleGenerateStudyPlan}
-                      className={`rounded-full px-5 py-3 text-sm font-semibold text-white ${
-                        plannerIsExamWeek
-                          ? "bg-gradient-to-r from-rose-500 to-orange-500"
-                          : "bg-gradient-to-r from-cyan-500 to-fuchsia-500"
-                      }`}
-                    >
-                      {studyPlanLoading ? "Building plan..." : "Generate Plan"}
-                    </button>
-                    <div className={`rounded-full border px-4 py-3 text-sm ${
-                      isDarkTheme
-                        ? "border-white/10 bg-white/[0.03] text-white/65"
-                        : "border-slate-300 bg-slate-50 text-slate-600"
-                    }`}>
-                      {syllabusSubjectTitle || displayTitle || "Choose a lesson to make the plan more specific"}
-                    </div>
-                  </div>
-
-                  {studyPlanError ? (
-                    <div className={`mt-4 rounded-2xl border px-4 py-3 text-sm ${
-                      isDarkTheme
-                        ? "border-rose-500/20 bg-rose-500/10 text-rose-200"
-                        : "border-rose-200 bg-rose-50 text-rose-700"
-                    }`}>
-                      {studyPlanError}
-                    </div>
-                  ) : null}
-
-                  <div className="mt-5 grid gap-3 md:grid-cols-2">
-                    <div className={`rounded-2xl border px-4 py-4 ${
-                      isDarkTheme
-                        ? "border-white/10 bg-white/[0.02]"
-                        : "border-slate-300/70 bg-slate-50/90"
-                    }`}>
-                      <p className={`text-xs uppercase tracking-[0.22em] ${textMuted}`}>Priority Topics</p>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {(studyPlan?.priorityTopics.length ? studyPlan.priorityTopics : plannerTopicTitles.slice(0, 6)).map((topic) => (
-                          <button
-                            key={topic}
-                            type="button"
-                            onClick={() => handleTopicSelect({ title: topic })}
-                            className={`rounded-full border px-3 py-1.5 text-xs ${
-                              isDarkTheme
-                                ? "border-white/10 bg-white/[0.04] text-white/75"
-                                : "border-slate-300 bg-white text-slate-700"
-                            }`}
-                          >
-                            {topic}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    <div className={`rounded-2xl border px-4 py-4 ${
-                      isDarkTheme
-                        ? "border-white/10 bg-white/[0.02]"
-                        : "border-slate-300/70 bg-slate-50/90"
-                    }`}>
-                      <p className={`text-xs uppercase tracking-[0.22em] ${textMuted}`}>Quick Wins</p>
-                      <div className="mt-3 space-y-2">
-                        {(studyPlan?.quickWins.length ? studyPlan.quickWins : [
-                          "Choose your exam date and generate a day-wise revision plan.",
-                          "Keep practice sets marked complete so the planner prioritizes weak areas.",
-                          "Use the shared revision packs to bring classmates into the same exam sprint.",
-                        ]).map((item) => (
-                          <div key={item} className={`rounded-2xl border px-3 py-3 text-sm ${
-                            isDarkTheme
-                              ? "border-white/10 bg-white/[0.03] text-white/75"
-                              : "border-slate-200 bg-white text-slate-700"
-                          }`}>
-                            {item}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className={`rounded-3xl border p-5 ${
-                  isDarkTheme
-                    ? "border-white/10 bg-white/[0.03]"
-                    : "border-slate-300/70 bg-white/92"
-                }`}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className={`text-xs uppercase tracking-[0.22em] ${textMuted}`}>Day-wise Plan</p>
-                      <p className={`mt-2 text-lg font-semibold ${textPrimary}`}>
-                        {studyPlan ? studyPlan.mode === "exam_week" ? "Exam week sprint" : "Steady revision rhythm" : "Generate a planner to see your schedule"}
-                      </p>
-                    </div>
-                    {studyPlan?.urgency ? (
-                      <span className={`rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] ${
-                        studyPlan.urgency === "critical"
-                          ? isDarkTheme
-                            ? "bg-rose-500/15 text-rose-200"
-                            : "bg-rose-100 text-rose-700"
-                          : studyPlan.urgency === "high"
-                            ? isDarkTheme
-                              ? "bg-amber-500/15 text-amber-200"
-                              : "bg-amber-100 text-amber-700"
-                            : isDarkTheme
-                              ? "bg-emerald-500/15 text-emerald-200"
-                              : "bg-emerald-100 text-emerald-700"
-                      }`}>
-                        {studyPlan.urgency}
-                      </span>
-                    ) : null}
-                  </div>
-
-                  <div className="mt-4 space-y-3">
-                    {(studyPlan?.dailyPlan || []).length ? (
-                      studyPlan?.dailyPlan.map((day) => (
-                        <div
-                          key={`${day.dayLabel}-${day.date}`}
-                          className={`rounded-2xl border px-4 py-4 ${
-                            isDarkTheme
-                              ? "border-white/10 bg-white/[0.03]"
-                              : "border-slate-200 bg-slate-50/90"
-                          }`}
-                        >
-                          <div className="flex flex-wrap items-start justify-between gap-3">
-                            <div>
-                              <p className={`text-sm font-semibold ${textPrimary}`}>{day.dayLabel}</p>
-                              <p className={`mt-1 text-xs ${textMuted}`}>{day.date} · {day.minutes} mins</p>
-                            </div>
-                            <p className={`text-sm ${textSecondary}`}>{day.focus}</p>
-                          </div>
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            {day.topicTitles.map((topic) => (
-                              <button
-                                key={`${day.dayLabel}-${topic}`}
-                                type="button"
-                                onClick={() => handleTopicSelect({ title: topic })}
-                                className={`rounded-full border px-3 py-1.5 text-xs ${
-                                  isDarkTheme
-                                    ? "border-white/10 bg-white/[0.04] text-white/75"
-                                    : "border-slate-300 bg-white text-slate-700"
-                                }`}
-                              >
-                                {topic}
-                              </button>
-                            ))}
-                          </div>
-                          <p className={`mt-3 text-sm ${textSecondary}`}>{day.checkpoint}</p>
-                        </div>
-                      ))
-                    ) : (
-                      <div className={`rounded-2xl border border-dashed px-4 py-8 text-sm ${
-                        isDarkTheme
-                          ? "border-white/10 bg-white/[0.02] text-white/45"
-                          : "border-slate-200 bg-slate-50 text-slate-500"
-                      }`}>
-                        Pick your exam date and we will build a personalized revision path for this subject.
-                      </div>
-                    )}
-                  </div>
-
-                  {studyPlan?.finalRevisionChecklist.length ? (
-                    <div className="mt-5">
-                      <p className={`text-xs uppercase tracking-[0.22em] ${textMuted}`}>Final Revision Checklist</p>
-                      <div className="mt-3 grid gap-2 md:grid-cols-2">
-                        {studyPlan.finalRevisionChecklist.map((item) => (
-                          <div
-                            key={item}
-                            className={`rounded-2xl border px-4 py-3 text-sm ${
-                              isDarkTheme
-                                ? "border-white/10 bg-white/[0.03] text-white/75"
-                                : "border-slate-200 bg-white text-slate-700"
-                            }`}
-                          >
-                            {item}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-          </div>
         </motion.div>
       </AnimatePresence>
         </div>
