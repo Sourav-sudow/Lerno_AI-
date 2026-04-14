@@ -231,7 +231,7 @@ export default function ProfilePage() {
                     isDarkTheme ? "text-white/40" : "text-slate-500"
                   }`}
                 >
-                  {role === "faculty" ? "Faculty Profile" : "Learner Profile"}
+                  {role === "faculty" ? "Faculty Profile" : "Student Profile"}
                 </p>
                 <h1
                   className={`mt-2 text-3xl font-semibold ${

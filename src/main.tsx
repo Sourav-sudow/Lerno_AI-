@@ -15,6 +15,7 @@ const ProfilePage = lazy(() => import("./components/ProfilePage.tsx"));
 const OnboardingPage = lazy(() => import("./components/OnboardingPage.tsx"));
 const FacultyDashboardPage = lazy(() => import("./components/FacultyDashboardPage.tsx"));
 const SharedArtifactPage = lazy(() => import("./components/SharedArtifactPage.tsx"));
+const ExamWeekPage = lazy(() => import("./components/ExamWeekPage.tsx"));
 
 function LearningFallback() {
   return (
@@ -126,6 +127,14 @@ createRoot(document.getElementById("root")!).render(
               element={
                 <ProtectedRoute allowRole="student">
                   <LearningPage />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/exam-week"
+              element={
+                <ProtectedRoute allowRole="student">
+                  <ExamWeekPage />
                 </ProtectedRoute>
               }
             />

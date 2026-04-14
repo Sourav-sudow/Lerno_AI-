@@ -6,8 +6,15 @@ interface ImportMetaEnv {
   readonly VITE_GEMINI_API_KEY?: string;
   readonly VITE_GEMINI_MODEL?: string;
   readonly VITE_OPENROUTER_API_KEY?: string;
+  readonly VITE_OPENROUTER_API_KEY_1?: string;
+  readonly VITE_OPENROUTER_API_KEY_2?: string;
+  readonly VITE_OPENROUTER_API_KEY_3?: string;
+  readonly VITE_OPENROUTER_API_KEYS?: string;
   readonly VITE_OPENROUTER_TUTOR_MODEL?: string;
   readonly VITE_OPENROUTER_QUIZ_MODEL?: string;
+  readonly VITE_OPENROUTER_TUTOR_MAX_TOKENS?: string;
+  readonly VITE_OPENROUTER_EXAM_MAX_TOKENS?: string;
+  readonly VITE_OPENROUTER_QUIZ_MAX_TOKENS?: string;
 }
 
 interface ImportMeta {

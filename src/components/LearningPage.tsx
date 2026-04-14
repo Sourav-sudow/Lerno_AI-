@@ -169,6 +169,7 @@ const LearningPage = () => {
   const hydratedSessionRef = useRef(false);
   const viewedLessonKeysRef = useRef<Set<string>>(new Set());
   const sharedTopicHandledRef = useRef("");
+  const examWeekLaunchTimerRef = useRef<number | null>(null);
 
   const profileRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLDivElement | null>(null);
@@ -321,6 +322,7 @@ const LearningPage = () => {
   const [studyPlan, setStudyPlan] = useState<StudyPlan | null>(null);
   const [studyPlanLoading, setStudyPlanLoading] = useState(false);
   const [studyPlanError, setStudyPlanError] = useState<string | null>(null);
+  const [examWeekLaunchPending, setExamWeekLaunchPending] = useState(false);
 
   const displayTitle = selectedTopicTitle || "";
   const displayNarration = selectedTopicNarration || "";
@@ -421,6 +423,14 @@ const LearningPage = () => {
     };
     document.addEventListener("mousedown", handleClickAway);
     return () => document.removeEventListener("mousedown", handleClickAway);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (examWeekLaunchTimerRef.current) {
+        window.clearTimeout(examWeekLaunchTimerRef.current);
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -1162,6 +1172,26 @@ const LearningPage = () => {
     }
   };
 
+  const handleOpenExamWeek = () => {
+    if (examWeekLaunchPending) return;
+
+    setExamWeekLaunchPending(true);
+    if (examWeekLaunchTimerRef.current) {
+      window.clearTimeout(examWeekLaunchTimerRef.current);
+    }
+
+    examWeekLaunchTimerRef.current = window.setTimeout(() => {
+      navigate("/exam-week", {
+        state: {
+          subjectTitle: syllabusSubjectTitle,
+          topicTitle: displayTitle,
+          topicTitles: plannerTopicTitles.slice(0, 8),
+        },
+      });
+      setExamWeekLaunchPending(false);
+    }, 420);
+  };
+
   const lastSelectionHint = selectedTopicTitle || (allTopics[0]?.title ?? "");
   const isDarkTheme = theme === "dark";
   const textPrimary = isDarkTheme ? "text-white" : "text-slate-900";
@@ -1572,6 +1602,70 @@ const LearningPage = () => {
         </div>
         <div ref={searchRef} className="w-full max-w-2xl relative">
           <div className="flex items-center gap-3">
+            <motion.button
+              type="button"
+              onClick={handleOpenExamWeek}
+              whileTap={{ scale: 0.97 }}
+              animate={
+                examWeekLaunchPending
+                  ? {
+                      scale: [1, 1.04, 0.98, 1],
+                      boxShadow: isDarkTheme
+                        ? [
+                            "0 20px 60px -25px rgba(0,0,0,0.45)",
+                            "0 24px 70px -18px rgba(168,85,247,0.45)",
+                            "0 20px 60px -25px rgba(0,0,0,0.45)",
+                          ]
+                        : [
+                            "0 20px 60px -25px rgba(30,41,59,0.18)",
+                            "0 24px 70px -18px rgba(59,130,246,0.3)",
+                            "0 20px 60px -25px rgba(30,41,59,0.18)",
+                          ],
+                    }
+                  : { scale: 1 }
+              }
+              transition={{ duration: 0.38, ease: "easeInOut" }}
+              className={`relative flex h-14 shrink-0 items-center gap-2 overflow-hidden rounded-full border px-4 shadow-[0_20px_60px_-25px_rgba(0,0,0,0.45)] backdrop-blur-xl transition-all duration-300 ${
+                isDarkTheme
+                  ? "border-cyan-400/20 bg-gradient-to-r from-cyan-500/15 via-sky-500/10 to-fuchsia-500/15 text-white hover:bg-white/10"
+                  : "border-cyan-300/80 bg-white/92 text-slate-800 hover:bg-white"
+              }`}
+              aria-label="Open Exam Week planner"
+              title="Open Exam Week planner"
+            >
+              <span
+                className={`absolute inset-0 opacity-0 transition-opacity duration-300 ${
+                  examWeekLaunchPending ? "opacity-100" : ""
+                } ${isDarkTheme ? "bg-gradient-to-r from-cyan-500/20 via-fuchsia-500/20 to-cyan-500/20" : "bg-gradient-to-r from-cyan-100 via-fuchsia-100 to-cyan-100"}`}
+              />
+              <span className="relative z-10 flex items-center gap-2">
+                <span
+                  className={`flex h-8 w-8 items-center justify-center rounded-full ${
+                    isDarkTheme ? "bg-white/10 text-cyan-100" : "bg-cyan-100 text-cyan-700"
+                  }`}
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={1.7}
+                    className="h-4 w-4"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 3.75h7.5m-9 4.5h10.5m-10.5 4.5h10.5m-10.5 4.5h6" />
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M16.5 16.5 18 18l3-3" />
+                  </svg>
+                </span>
+                <span className="hidden sm:block text-left">
+                  <span className="block text-[10px] uppercase tracking-[0.22em] opacity-65">
+                    Exam Week
+                  </span>
+                  <span className="block text-sm font-semibold">
+                    {examWeekLaunchPending ? "Opening..." : "Planner"}
+                  </span>
+                </span>
+              </span>
+            </motion.button>
             <div className={`flex flex-1 items-center gap-3 px-4 py-3 rounded-full shadow-[0_20px_60px_-25px_rgba(0,0,0,0.7)] focus-within:ring-2 focus-within:ring-purple-500/60 backdrop-blur-xl transition-colors duration-300 ${
               isDarkTheme
                 ? "bg-white/5 border border-white/10"

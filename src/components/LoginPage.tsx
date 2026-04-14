@@ -65,9 +65,7 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
   const [email, setEmail] = useState(pendingContext?.email || "");
   const [otp, setOtp] = useState("");
   const [step, setStep] = useState<"email" | "otp">("email");
-  const [selectedRole] = useState<UserRole>(
-    pendingContext?.role === "faculty" ? "student" : pendingContext?.role || "student"
-  );
+  const [selectedRole, setSelectedRole] = useState<UserRole>(pendingContext?.role || "student");
   const [selectedUniversityId, setSelectedUniversityId] = useState(
     pendingContext?.universityId || queryUniversity || universities[0]?.id || ""
   );
@@ -164,6 +162,7 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
 
   const isValidEmail = (value: string) =>
     /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/i.test(value.trim());
+  const isKrmuEmail = (value: string) => /@krmu\.edu\.in$/i.test(value.trim());
 
   const persistPendingContext = (normalizedEmail: string) => {
     setPendingSignupContext({
@@ -415,12 +414,12 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
             </div>
             <h1 className="mt-7 max-w-xl font-serif text-6xl leading-[1.05] text-white">
               {mode === "login"
-                ? "Log into your student workspace without single-college lock-in."
-                : "Create a multi-campus student profile in one guided flow."}
+                ? "Log into your campus workspace without losing the KRMU login path."
+                : "Create a multi-campus learner profile in one guided flow."}
             </h1>
             <p className="mt-5 max-w-xl text-lg leading-8 text-slate-300/80">
               {mode === "login"
-                ? "Existing students can re-enter directly, while their campus context stays attached to the account."
+                ? "Existing students and faculty can re-enter directly. KRMU users can still continue with their `@krmu.edu.in` email."
                 : "Choose your university, department family, program, and term before OTP so Lerno can route you into the right pilot content pack."}
             </p>
 
@@ -428,9 +427,9 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
               {[
                 ["Multi-University", "The same auth flow now works for multiple campuses, not just one domain."],
                 [
-                  mode === "login" ? "Campus-Aware Login" : "OTP Verification",
+                  mode === "login" ? "KRMU Direct Login" : "OTP Verification",
                   mode === "login"
-                    ? "Returning users keep their university, program, and term context."
+                    ? "Returning `@krmu.edu.in` users still get the old direct campus-style re-entry."
                     : "Signup context is captured before OTP so onboarding stays structured.",
                 ],
                 ["Pilot Packs", "Starter content is ready for CS, Management, and Commerce families."],
@@ -470,7 +469,7 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
                       {step === "email"
                         ? mode === "login"
                           ? "Enter the email tied to your Lerno account."
-                          : "Select your campus context, then verify OTP to unlock student onboarding."
+                          : "Select your campus context, then verify OTP to unlock onboarding."
                         : `Enter the 6-digit code sent to ${maskedEmail}.`}
                     </p>
                   </div>
@@ -488,8 +487,29 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
                   <form onSubmit={handleSendOtp} className="space-y-6">
                     {mode === "signup" ? (
                       <>
-                        <div className="rounded-3xl border border-cyan-400/20 bg-cyan-400/8 px-4 py-4 text-sm text-cyan-100/90">
-                          Student-only public app flow. Choose your campus and continue into the learner workspace.
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          {(["student", "faculty"] as UserRole[]).map((role) => {
+                            const active = selectedRole === role;
+                            return (
+                              <button
+                                key={role}
+                                type="button"
+                                onClick={() => setSelectedRole(role)}
+                                className={`rounded-3xl border px-4 py-4 text-left transition ${
+                                  active
+                                    ? "border-cyan-400/40 bg-cyan-400/10 shadow-[0_0_0_1px_rgba(34,211,238,0.18)]"
+                                    : "border-white/10 bg-white/[0.03] hover:bg-white/[0.06]"
+                                }`}
+                              >
+                                <p className="text-base font-semibold capitalize text-white">{role}</p>
+                                <p className="mt-1 text-sm text-slate-300/70">
+                                  {role === "student"
+                                    ? "Campus-scoped learner workspace with AI study tools."
+                                    : "Faculty workspace for pilot content quality and topic video control."}
+                                </p>
+                              </button>
+                            );
+                          })}
                         </div>
 
                         <div className="grid gap-4 md:grid-cols-2">
@@ -561,7 +581,7 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
                           {" · "}
                           {selectionSummary.programName || "Program"}
                           {" · "}
-                          {selectionSummary.termName || "Term"}
+                        {selectionSummary.termName || "Term"}
                         </div>
                       </>
                     ) : null}
@@ -575,12 +595,22 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
                           type="email"
                           value={email}
                           onChange={(e) => setEmail(e.target.value)}
-                          placeholder={mode === "login" ? "student@college.edu" : "you@college.edu"}
+                          placeholder={mode === "login" ? "2301201171@krmu.edu.in" : "you@college.edu"}
                           className="w-full rounded-[20px] bg-transparent px-4 py-4 text-lg text-white outline-none placeholder:text-slate-500"
                           autoComplete="email"
                           required
                         />
                       </div>
+                      {mode === "login" ? (
+                        <p className="mt-2 text-xs text-slate-400">
+                          KRMU users can still log in with their `@krmu.edu.in` email here. Other pilot campuses can use their saved account email too.
+                        </p>
+                      ) : null}
+                      {mode === "login" && isKrmuEmail(email) ? (
+                        <div className="mt-3 rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-3 text-sm text-cyan-100">
+                          KRMU direct login path active for this email.
+                        </div>
+                      ) : null}
                     </div>
 
                     {mode === "signup" ? (
@@ -622,7 +652,7 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
                           : "Sending OTP..."
                         : mode === "login"
                           ? "Continue to Workspace"
-                          : "Send OTP for Student Signup"}
+                          : `Send OTP for ${selectedRole === "faculty" ? "Faculty" : "Student"} Signup`}
                     </button>
                   </form>
                 ) : (
@@ -707,7 +737,7 @@ export default function LoginPage({ mode = "login" }: LoginPageProps) {
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <p>
                     {mode === "login"
-                      ? "Student login works across supported pilot campuses."
+                      ? "KRMU email login and pilot-campus login both stay supported."
                       : "Signup currently supports starter packs for CS / Engineering, Management, and Commerce."}
                   </p>
                   <button

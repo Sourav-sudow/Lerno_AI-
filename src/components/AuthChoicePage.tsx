@@ -34,17 +34,18 @@ export default function AuthChoicePage() {
               AI Learning Platform
             </div>
             <h1 className="mt-7 max-w-2xl font-serif text-6xl leading-[1.02] text-white">
-              Enter Lerno.ai as a college student, not a complex portal.
+              Enter Lerno.ai with the flow that matches your role.
             </h1>
             <p className="mt-5 max-w-xl text-lg leading-8 text-slate-300/80">
-              Existing learners can re-enter with their saved campus profile. New students
-              can choose a university, verify OTP, and then finish onboarding.
+              Existing users can re-enter with their saved campus profile. KRMU learners can
+              still use their `@krmu.edu.in` login path, and new students or faculty can
+              choose a university, verify OTP, and then finish onboarding.
             </p>
 
             <div className="mt-10 grid max-w-2xl gap-4 md:grid-cols-3">
               {[
-                ["Login", "Fast re-entry for users already stored in Firebase."],
-                ["Signup", "University-aware entry for new student accounts."],
+                ["Login", "Fast re-entry for campus users, including KRMU `@krmu.edu.in` accounts."],
+                ["Signup", "University-aware entry for new student and faculty accounts."],
                 ["Firestore", "All profiles, sessions, and preferences persist in database."],
               ].map(([title, copy]) => (
                 <div
@@ -72,7 +73,7 @@ export default function AuthChoicePage() {
                 <h2 className="mt-3 text-3xl font-semibold text-white">Choose how you want to enter</h2>
                 <p className="mt-2 text-sm leading-6 text-slate-300/70">
                   Log in if your account already exists. Sign up if you are onboarding as a
-                  new student.
+                  new student or faculty member.
                 </p>
               </div>
 
@@ -84,7 +85,7 @@ export default function AuthChoicePage() {
                 >
                   <p className="text-lg font-semibold text-white">Login</p>
                   <p className="mt-1 text-sm text-white/80">
-                    Already onboarded in Firebase? Continue straight into your workspace.
+                    Already onboarded in Firebase? Continue straight into your workspace, including KRMU email login.
                   </p>
                 </button>
 
@@ -95,7 +96,7 @@ export default function AuthChoicePage() {
                 >
                   <p className="text-lg font-semibold text-white">Signup</p>
                   <p className="mt-1 text-sm text-slate-300/75">
-                    New here? Choose your campus, verify OTP, and complete your student onboarding.
+                    New here? Pick Student or Faculty, verify OTP, and complete onboarding.
                   </p>
                 </button>
               </div>

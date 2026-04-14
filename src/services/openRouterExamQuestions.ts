@@ -1,3 +1,10 @@
+import {
+  compressModelContext,
+  createOpenRouterChatCompletion,
+  getOpenRouterApiKeys,
+  getOpenRouterMaxTokens,
+} from "./openRouterClient";
+
 export type ExamQuestion = {
   question: string;
   marks: number;
@@ -10,28 +17,7 @@ export type GeneratedExamQuestions = {
 
 const EXAM_MODEL = import.meta.env.VITE_OPENROUTER_QUIZ_MODEL || "openrouter/auto";
 
-const systemPrompt = `You are a university exam question generator for engineering students.
-Generate important descriptive exam questions based on the given topic.
-- Respond with JSON only. No markdown, no bullets, no code fences.
-- Questions should be university exam style (descriptive, not MCQs).
-- Questions should test deep understanding and application of concepts.
-- 5-mark questions should be answerable in 200-300 words.
-- 10-mark questions should be comprehensive, requiring detailed explanations, diagrams, or examples.
-- Stay strictly on the provided topic.
-- Questions should be suitable for B.Tech/university level exams.
-
-JSON schema:
-{
-  "fiveMarkQuestions": [
-    { "question": "...", "marks": 5 },
-    { "question": "...", "marks": 5 },
-    { "question": "...", "marks": 5 }
-  ],
-  "tenMarkQuestions": [
-    { "question": "...", "marks": 10 },
-    { "question": "...", "marks": 10 }
-  ]
-}`;
+const systemPrompt = `Return strict JSON with keys "fiveMarkQuestions" and "tenMarkQuestions". Generate 3 concise university-style 5-mark questions and 2 deep 10-mark questions only for the given topic.`;
 
 function fallbackQuestions(topic: string): GeneratedExamQuestions {
   return {
@@ -63,44 +49,28 @@ export async function generateExamQuestions(
   topic: string,
   context?: string
 ): Promise<GeneratedExamQuestions> {
-  const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
-  if (!apiKey) {
+  if (!getOpenRouterApiKeys().length) {
     console.warn("OpenRouter API key not set; returning fallback questions");
     return fallbackQuestions(topic);
   }
 
-  const userPrompt = context
-    ? `Topic: ${topic}\n\nContext: ${context}\n\nGenerate 3 important 5-mark questions and 2 important 10-mark questions for university exams on this topic.`
-    : `Topic: ${topic}\n\nGenerate 3 important 5-mark questions and 2 important 10-mark questions for university exams on this topic.`;
+  const compactContext = compressModelContext(context, 700);
+  const userPrompt = compactContext
+    ? `Topic: ${topic}\nContext: ${compactContext}\nNeed: 3 five-mark + 2 ten-mark exam questions. JSON only.`
+    : `Topic: ${topic}\nNeed: 3 five-mark + 2 ten-mark exam questions. JSON only.`;
 
   try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": window.location.origin,
-        "X-Title": "Lerno.ai Exam Questions",
-      },
-      body: JSON.stringify({
-        model: EXAM_MODEL,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        temperature: 0.7,
-        max_tokens: 1500,
-      }),
+    const content = await createOpenRouterChatCompletion({
+      model: EXAM_MODEL,
+      title: "Lerno.ai Exam Questions",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.55,
+      maxTokens: getOpenRouterMaxTokens("exam"),
+      minTokens: 220,
     });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("OpenRouter API error:", response.status, errorText);
-      return fallbackQuestions(topic);
-    }
-
-    const data = await response.json();
-    const content = data.choices?.[0]?.message?.content ?? "";
 
     if (!content) {
       console.warn("Empty response from API; returning fallback");

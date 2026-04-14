@@ -1,3 +1,10 @@
+import {
+  compressModelContext,
+  createOpenRouterChatCompletion,
+  getOpenRouterApiKeys,
+  getOpenRouterMaxTokens,
+} from "./openRouterClient";
+
 export type GeneratedMCQ = {
   question: string;
   choices: string[];
@@ -7,23 +14,7 @@ export type GeneratedMCQ = {
 
 const QUIZ_MODEL = import.meta.env.VITE_OPENROUTER_QUIZ_MODEL || "openrouter/auto";
 
-const systemPrompt = `You are an educational quiz generator.
-Create concise multiple-choice questions (MCQs) for college students.
-- Respond with JSON array only. No markdown, no bullets, no code fences.
-- For each question, provide exactly 4 concise options and one correct index.
-- Keep wording short and clear; no markdown.
-- Stay strictly on the provided topic/content.
-- Do not repeat questions; avoid trivial duplicates.
-- Keep difficulty beginner-friendly.
-JSON schema:
-[
-  {
-    "question": "...",
-    "choices": ["A", "B", "C", "D"],
-    "correctIndex": 0,
-    "explanation": "... (optional)"
-  }
-]`;
+const systemPrompt = `Return a JSON array only. Generate concise beginner-friendly college MCQs with exactly 4 options and one correctIndex per question. Stay on-topic and avoid repeats.`;
 
 function fallbackMCQs(topic: string, count = 10): GeneratedMCQ[] {
   const base: GeneratedMCQ[] = [
@@ -133,38 +124,31 @@ export async function generateMCQsFromTopic(
   context: string,
   count = 10
 ): Promise<GeneratedMCQ[]> {
-  const apiKey = import.meta.env.VITE_OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error("Missing VITE_OPENROUTER_API_KEY");
+  if (!getOpenRouterApiKeys().length) return fallbackMCQs(topic, count);
 
-  const body = {
-    model: QUIZ_MODEL,
-    messages: [
-      { role: "system", content: systemPrompt },
-      {
-        role: "user",
-        content: `Topic: ${topic}\nContext (transcript/notes): ${context}\nNumber of questions: ${count}\nReturn JSON array only.`,
-      },
-    ],
-    max_tokens: 600,
-    temperature: 0.6,
-  };
+  const compactContext = compressModelContext(context, 900);
 
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`OpenRouter quiz error ${res.status}: ${errText}`);
+  let raw = "";
+  try {
+    raw = await createOpenRouterChatCompletion({
+      model: QUIZ_MODEL,
+      title: "Lerno.ai Quiz Generator",
+      messages: [
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: `Topic: ${topic}\nContext: ${compactContext}\nQuestions: ${count}\nReturn JSON array only.`,
+        },
+      ],
+      maxTokens: Math.min(getOpenRouterMaxTokens("quiz"), Math.max(180, count * 32)),
+      minTokens: 160,
+      temperature: 0.45,
+    });
+  } catch (error) {
+    console.warn("OpenRouter quiz request failed, using fallback MCQs", error);
+    return fallbackMCQs(topic, count);
   }
 
-  const data = await res.json();
-  const raw = data.choices?.[0]?.message?.content ?? "";
   const jsonText = sanitizeJson(raw);
 
   try {

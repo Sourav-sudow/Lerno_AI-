@@ -187,7 +187,7 @@ export default function OnboardingPage() {
             }`}
           >
             Your campus, department family, program, and term will decide which pilot content pack
-            and learner workspace you land in.
+            and workspace you land in.
           </p>
         </div>
 
@@ -238,7 +238,7 @@ export default function OnboardingPage() {
                 >
                   {role === "student"
                     ? "Students get a campus-scoped learning workspace with recent topics, bookmarks, AI support, and exam planning."
-                    : "Internal faculty setup stays available for review workflows, but the public app is now student-first."}
+                    : "Faculty get a pilot dashboard focused on content quality and student-facing video overrides."}
                 </p>
               </div>
               <div
