@@ -309,6 +309,34 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def safe_int(value: Any, default: int) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return default
+        try:
+            return int(float(text))
+        except ValueError:
+            return default
+    if isinstance(value, datetime):
+        dt = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+        return int(dt.timestamp() * 1000)
+    if hasattr(value, "timestamp") and callable(getattr(value, "timestamp")):
+        try:
+            return int(value.timestamp() * 1000)
+        except Exception:
+            return default
+    return default
+
+
 def user_doc_id(email: str) -> str:
     return normalize_email(email)
 
@@ -360,7 +388,7 @@ def sanitize_topic_list(items: Any) -> List[Dict[str, Any]]:
                 ]
                 if isinstance(item.get("unitTopics"), list)
                 else [],
-                "lastVisitedAt": int(item.get("lastVisitedAt", now_ms())),
+                "lastVisitedAt": safe_int(item.get("lastVisitedAt"), now_ms()),
             }
         )
     return sanitized
@@ -870,7 +898,7 @@ def firestore_error_detail(exc: Exception) -> str:
         )
     if isinstance(exc, gcloud_exceptions.GoogleAPICallError):
         return f"Firestore request failed: {exc}"
-    return "Firestore request failed."
+    return f"Firestore request failed: {exc}"
 
 
 def firestore_guard(operation):
@@ -919,8 +947,8 @@ def serialize_user(
         "verificationStatus": profile_context.get("verificationStatus") or "",
         "referralCode": profile_context.get("referralCode") or "",
         "referredByCode": profile_context.get("referredByCode") or "",
-        "createdAt": int(user_data.get("createdAt", now_ms())),
-        "updatedAt": int(user_data.get("updatedAt", now_ms())),
+        "createdAt": safe_int(user_data.get("createdAt"), now_ms()),
+        "updatedAt": safe_int(user_data.get("updatedAt"), now_ms()),
     }
 
 
@@ -940,7 +968,10 @@ def build_session_payload(email: str, pending_context: Optional[Dict[str, Any]] 
             {
                 "theme": preferences_data.get("theme") or "dark",
                 "sidebarCollapsed": bool(preferences_data.get("sidebarCollapsed")),
-                "updatedAt": int(preferences_data.get("updatedAt", preferences["updatedAt"])),
+                "updatedAt": safe_int(
+                    preferences_data.get("updatedAt"),
+                    preferences["updatedAt"],
+                ),
             }
         )
 
@@ -956,7 +987,10 @@ def build_session_payload(email: str, pending_context: Optional[Dict[str, Any]] 
                 "currentSelection": sanitize_current_selection(
                     learning_data.get("currentSelection", {})
                 ),
-                "updatedAt": int(learning_data.get("updatedAt", learning_state["updatedAt"])),
+                "updatedAt": safe_int(
+                    learning_data.get("updatedAt"),
+                    learning_state["updatedAt"],
+                ),
             }
         )
 
