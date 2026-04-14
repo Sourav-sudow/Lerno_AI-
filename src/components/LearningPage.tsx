@@ -60,7 +60,19 @@ type UnitSearchItem = {
   topics: string[];
 };
 
+type TopicSearchItem = TopicItem & {
+  subjectTitle: string;
+  unitTitle: string;
+};
+
 type SearchSuggestionItem =
+  | {
+      id: string;
+      kind: "topic";
+      label: string;
+      meta: string;
+      value: TopicSearchItem;
+    }
   | {
       id: string;
       kind: "unit";
@@ -842,6 +854,36 @@ const LearningPage = () => {
       return [] as Array<{ key: string; title: string; items: SearchSuggestionItem[] }>;
     }
 
+    const topicItems: SearchSuggestionItem[] = allTopics
+      .filter((topic) => {
+        const title = topic.title.toLowerCase();
+        const subjectTitle = (topic.subjectTitle || "").toLowerCase();
+        const unitTitle = (topic.unitTitle || "").toLowerCase();
+        const narration = (topic.narration || "").toLowerCase();
+        return (
+          title.includes(query) ||
+          subjectTitle.includes(query) ||
+          unitTitle.includes(query) ||
+          narration.includes(query)
+        );
+      })
+      .slice(0, 10)
+      .map((topic) => {
+        const subjectTitle = topic.subjectTitle || "General";
+        const unitTitle = topic.unitTitle || "Topic";
+        return {
+          id: `topic-${subjectTitle}-${unitTitle}-${topic.title}`,
+          kind: "topic" as const,
+          label: topic.title,
+          meta: `${subjectTitle} • ${unitTitle}`,
+          value: {
+            ...topic,
+            subjectTitle,
+            unitTitle,
+          },
+        };
+      });
+
     const unitItems: SearchSuggestionItem[] = allUnits
       .filter((unit) => {
         const topicText = unit.topics.join(" ").toLowerCase();
@@ -861,9 +903,10 @@ const LearningPage = () => {
       }));
 
     return [
+      { key: "topics", title: "Topics", items: topicItems },
       { key: "units", title: "Units", items: unitItems },
     ].filter((group) => group.items.length);
-  }, [allUnits, search]);
+  }, [allTopics, allUnits, search]);
 
   const flatSuggestions = useMemo(
     () => suggestionGroups.flatMap((group) => group.items),
@@ -871,6 +914,11 @@ const LearningPage = () => {
   );
 
   const selectSuggestion = (item: SearchSuggestionItem) => {
+    if (item.kind === "topic") {
+      handleTopicSelect(item.value);
+      return;
+    }
+
     openUnitSuggestion(item.value);
   };
 
@@ -882,6 +930,16 @@ const LearningPage = () => {
       const nextSuggestion =
         flatSuggestions[activeSuggestionIndex] || flatSuggestions[0];
       selectSuggestion(nextSuggestion);
+      return;
+    }
+
+    const exactTopic = allTopics.find((topic) => topic.title.toLowerCase() === q);
+    const partialTopic = allTopics.find((topic) =>
+      topic.title.toLowerCase().includes(q)
+    );
+    const topicMatch = exactTopic || partialTopic;
+    if (topicMatch) {
+      handleTopicSelect(topicMatch);
       return;
     }
 
@@ -1704,8 +1762,8 @@ const LearningPage = () => {
               onKeyDown={handleSearchKeyDown}
               placeholder={
                 lastSelectionHint
-                  ? `Search unit... (e.g., Unit 1 – Foundations of Computer Networks)`
-                  : "Search unit... (Unit 1, Network Layer, Generative AI...)"
+                  ? `Search topic or unit... (e.g., OSI Model, Unit 1)`
+                  : "Search topic or unit... (OSI Model, Network Layer, Unit 2...)"
               }
               className={`w-full bg-transparent outline-none text-base md:text-lg transition-colors duration-300 ${
                 isDarkTheme
@@ -1806,7 +1864,7 @@ const LearningPage = () => {
                                     ? "border-white/10 bg-white/[0.04] text-white/45"
                                     : "border-slate-300 bg-white text-slate-500"
                                 }`}>
-                                  Unit
+                                  {item.kind === "topic" ? "Topic" : "Unit"}
                                 </span>
                               </button>
                             );
