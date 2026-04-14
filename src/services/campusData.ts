@@ -128,6 +128,20 @@ export function findUniversity(
   );
 }
 
+export function findUniversityByEmailDomain(email?: string | null) {
+  const normalizedEmail = (email || "").trim().toLowerCase();
+  if (!normalizedEmail.includes("@")) return null;
+
+  const domain = normalizedEmail.split("@", 2)[1] || "";
+  if (!domain) return null;
+
+  return (
+    universityRegistry.find((item) =>
+      (item.emailDomains || []).some((candidate) => candidate.trim().toLowerCase() === domain)
+    ) || null
+  );
+}
+
 export function findDepartment(
   universityIdOrSlug?: string | null,
   departmentId?: string | null
