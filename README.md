@@ -6,8 +6,6 @@ Repository: [`deployment-adaa`](https://github.com/Sourav-sudow/deployment-adaa)
 
 An AI-powered learning platform that visualizes concepts to enhance student understanding and retention. Lerno.ai is an intelligent learning platform that combines frontend web technologies with backend services in Node.js and FastAPI to deliver a comprehensive educational experience.
 
-Check out the PPT for details! - https://www.figma.com/slides/2P1pYfOLMtQcbQfyhlG9fi/lerno.ai-CTRL-ALT-DEFEAT?node-id=0-239&t=EhwKERTP5aHifi0N-1
-
 ## Project Setup
 
 ### Prerequisites
